@@ -35,9 +35,6 @@ from pb_recommendation import (
     exposed_projects,
     hidden_projects,
     as_approval_ballot,
-    APPROVAL,
-    DISAPPROVAL,
-    HIDDEN,
     approval_scores,
     consensus_levels,
     greedy_approval,
@@ -329,9 +326,9 @@ class TestPartialBallot:
         b = partial_ballot(
             approved={p["p1"]}, disapproved={p["p2"]}, hidden={p["p3"]}
         )
-        assert b[p["p1"]] == APPROVAL == 1
-        assert b[p["p2"]] == DISAPPROVAL == -1
-        assert b[p["p3"]] == HIDDEN == 0
+        assert b[p["p1"]] == 1
+        assert b[p["p2"]] == -1
+        assert b[p["p3"]] == 0
 
     def test_states_partition_projects(self):
         p = make_projects([("p1", 1), ("p2", 1), ("p3", 1)])

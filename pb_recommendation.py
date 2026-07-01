@@ -45,12 +45,10 @@ from pabutools.rules import BudgetAllocation
 # ``partial_ballot`` / ``reveal_ballot`` and read them back with the
 # ``*_projects`` accessors / ``as_approval_ballot``.
 
-#: Score stored for an approved project (A_v). Any strictly positive score works.
-APPROVAL = 1
-#: Score stored for a disapproved project (D_v). Any strictly negative score works.
-DISAPPROVAL = -1
-#: Score stored for a hidden project (H_v); absent projects mean the same.
-HIDDEN = 0
+# Scores stored (to be defined when the module is implemented):
+#   approved project (A_v)    -> +1  (any strictly positive score)
+#   disapproved project (D_v) -> -1  (any strictly negative score)
+#   hidden project (H_v)      ->  0  (absent projects mean the same)
 
 
 def partial_ballot(
@@ -60,9 +58,9 @@ def partial_ballot(
 ) -> CardinalBallot:
     """
     Build a partial ballot from the three explicit sets, hiding the convention:
-    approved projects get :data:`APPROVAL`, disapproved get :data:`DISAPPROVAL`,
-    hidden get :data:`HIDDEN`. This is the intended way to create a partial
-    ballot - callers name the three sets instead of writing raw scores.
+    approved projects get +1, disapproved get -1, and hidden get 0. This is the
+    intended way to create a partial ballot - callers name the three sets instead
+    of writing raw scores.
 
     Examples
     --------
