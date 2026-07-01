@@ -3,14 +3,6 @@ An implementation of the algorithms in:
 "A Recommendation System for Participatory Budgeting",
 by Gil Leibiker and Nimrod Talmon (2023), https://optlearnmas23.github.io/files/p17.pdf
 
-Terminology follows the paper: the voters are partitioned into the **Learning
-Voters (LV)**, who already provided their full ballots, and the **Target Voters
-(TV)**, who provide partial ballots. The goal is to estimate the **ideal
-instance** (where every voter provided a full ballot) from the partial one: for
-each TV voter the algorithm reveals k projects into her **exposed set** E_v
-(splitting into the **approval set** A_v and **disapproval set** D_v) and
-predicts her **hidden set** H_v.
-
 Programmer: Roei Yanku
 Date: 2026-06-20.
 """
@@ -28,16 +20,10 @@ from pabutools.election import (
 )
 from pabutools.rules import BudgetAllocation
 
-# Model training lives in a separate module (the professor's note b: separate
-# files for training the model and using it). The learning-based predictors
-# below fit their model there and only *use* it here. ``pb_model_training`` is
-# ballot-agnostic (it takes plain project sets), so the import is one-directional
-# and there is no circular dependency.
-from pb_model_training import (
-    train_classification,
-    train_matrix_factorization,
-    train_factorization_machines,
-)
+# Model training lives in a separate module, ``pb_model_training`` (the
+# professor's note b: separate files for training the model and using it). The
+# learning-based predictors below will call its ``train_*`` functions once
+# implemented; at this stage their bodies are empty, so nothing is imported yet.
 
 
 # ===========================================================================
@@ -592,7 +578,6 @@ def predict_by_classification(
     >>> predict_by_classification(inst, lv, partial) == {p1, p2}
     True
     """
-    train_classification(instance, lv_profile, exposed_projects(ballot))  # model used below
     return ApprovalBallot()  # Empty implementation
 
 
@@ -639,9 +624,6 @@ def predict_by_matrix_factorization(
     >>> predict_by_matrix_factorization(inst, lv, partial) == {p1, p2}
     True
     """
-    train_matrix_factorization(
-        instance, lv_profile, approved_projects(ballot), disapproved_projects(ballot)
-    )  # model used below
     return ApprovalBallot()  # Empty implementation
 
 
@@ -687,9 +669,6 @@ def predict_by_factorization_machines(
     >>> predict_by_factorization_machines(inst, lv, partial) == {p1, p2}
     True
     """
-    train_factorization_machines(
-        instance, lv_profile, approved_projects(ballot), disapproved_projects(ballot)
-    )  # model used below
     return ApprovalBallot()  # Empty implementation
 
 
