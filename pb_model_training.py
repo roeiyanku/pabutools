@@ -83,13 +83,6 @@ def train_classification(
             trained classifier) to be passed to
             :py:func:`pb_recommendation.predict_by_classification`.
     """
-    try:
-        import xgboost  # noqa: F401  (optional dependency, used once implemented)
-    except ImportError:
-        raise ImportError(
-            "You need to install xgboost to use the classification predictor "
-            "(pip install pabutools[recommendation])."
-        )
     return None  # Empty implementation
 
 
@@ -133,13 +126,6 @@ def train_matrix_factorization(
             A fitted factorisation model to be passed to
             :py:func:`pb_recommendation.predict_by_matrix_factorization`.
     """
-    try:
-        import surprise  # noqa: F401  (optional dependency, used once implemented)
-    except ImportError:
-        raise ImportError(
-            "You need to install scikit-surprise to use the matrix-factorization "
-            "predictor (pip install pabutools[recommendation])."
-        )
     return None  # Empty implementation
 
 
@@ -179,13 +165,6 @@ def train_factorization_machines(
             A fitted FM model to be passed to
             :py:func:`pb_recommendation.predict_by_factorization_machines`.
     """
-    try:
-        import lightfm  # noqa: F401  (optional dependency, used once implemented)
-    except ImportError:
-        raise ImportError(
-            "You need to install lightfm to use the factorization-machines "
-            "predictor (pip install pabutools[recommendation])."
-        )
     return None  # Empty implementation
 
 
