@@ -36,6 +36,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+recommendation = [
+    "xgboost",
+    "scikit-surprise",
+    "lightfm"
+]
 dev = [
     "coverage",
     "Sphinx",

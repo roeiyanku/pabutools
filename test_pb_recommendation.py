@@ -27,8 +27,17 @@ from pabutools.election import (
 )
 
 from pb_recommendation import (
-    PartialApprovalBallot,
+    # Partial-ballot helpers + the +1/-1/0 convention constants.
+    partial_ballot,
     reveal_ballot,
+    approved_projects,
+    disapproved_projects,
+    exposed_projects,
+    hidden_projects,
+    as_approval_ballot,
+    APPROVAL,
+    DISAPPROVAL,
+    HIDDEN,
     approval_scores,
     consensus_levels,
     greedy_approval,
@@ -42,7 +51,6 @@ from pb_recommendation import (
     predict_by_matrix_factorization,
     predict_by_factorization_machines,
     recommend,
-    symmetric_distance,
     fractional_allocation_score,
 )
 
@@ -231,22 +239,22 @@ class TestRandomSetup:
     def test_exposes_exactly_k(self):
         p = make_projects([("p1", 2), ("p2", 2), ("p3", 3), ("p4", 3)])
         inst = Instance(p.values(), budget_limit=6)
-        exposed = random_setup(inst, {"v4": set(p.values())}, k=2, seed=0)
-        assert len(exposed["v4"]) == 2
-        assert exposed["v4"] <= set(p.values())
+        exposed = random_setup(inst, k=2, seed=0)
+        assert len(exposed) == 2
+        assert exposed <= set(p.values())
 
-    def test_all_tv_voters_covered(self):
+    def test_returns_a_set_subset_of_projects(self):
         projects, inst, _ = random_instance(10, 1, 30, seed=5)
-        tv = {f"v{i}": set() for i in range(5)}
-        exposed = random_setup(inst, tv, k=3, seed=7)
-        assert set(exposed.keys()) == set(tv.keys())
-        assert all(len(exposed[v]) == 3 for v in tv)
+        exposed = random_setup(inst, k=3, seed=7)
+        assert isinstance(exposed, set)
+        assert len(exposed) == 3
+        assert exposed <= set(projects)
 
-    def test_k_zero(self):
+    def test_k_equals_all_exposes_everything(self):
+        # Edge case: exposing k = |P| projects reveals the whole instance.
         p = make_projects([("p1", 1), ("p2", 1)])
         inst = Instance(p.values(), budget_limit=2)
-        exposed = random_setup(inst, {"v1": set()}, k=0, seed=0)
-        assert exposed["v1"] == set()
+        assert random_setup(inst, k=2, seed=0) == set(p.values())
 
 
 # ---------------------------------------------------------------------------
@@ -263,22 +271,22 @@ class TestOfflineSamplers:
                 ApprovalBallot([p["p1"]]),
             ]
         )
-        assert offline_popularity(inst, lv, k=1) == [p["p1"]]
+        assert offline_popularity(inst, lv, k=1) == {p["p1"]}
 
     def test_consensus_example7(self, consensus_data):
         p, inst, lv = consensus_data
-        assert offline_consensus(inst, lv, k=1) == [p["p1"]]
+        assert offline_consensus(inst, lv, k=1) == {p["p1"]}
 
     def test_controversiality_example8(self, consensus_data):
         p, inst, lv = consensus_data
-        assert offline_controversiality(inst, lv, k=1) == [p["p2"]]
+        assert offline_controversiality(inst, lv, k=1) == {p["p2"]}
 
     def test_popularity_matches_manual_topk_random(self):
         # Cross-check the popularity sampler against an independent top-k.
         projects, inst, lv = random_instance(20, 40, 50, seed=33)
         k = 5
         counts = manual_scores(projects, lv)
-        expected = sorted(projects, key=lambda p: (-counts[p], str(p)))[:k]
+        expected = set(sorted(projects, key=lambda p: (-counts[p], str(p)))[:k])
         assert offline_popularity(inst, lv, k=k) == expected
 
 
@@ -299,47 +307,70 @@ class TestOnlineAdaptive:
         )
         assert online_adaptive_controversial(
             inst, lv, {p["p1"], p["p2"]}, k=2
-        ) == [p["p1"], p["p2"]]
+        ) == {p["p1"], p["p2"]}
 
     def test_returns_k_distinct(self):
         projects, inst, lv = random_instance(15, 30, 60, seed=9)
         result = online_adaptive_controversial(inst, lv, set(projects[:5]), k=4)
+        assert isinstance(result, set)
         assert len(result) == 4
-        assert len(set(result)) == 4
-        assert set(result) <= set(projects)
+        assert result <= set(projects)
 
 
 # ---------------------------------------------------------------------------
-# PartialApprovalBallot + reveal_ballot (three-state ballots, Section 2.3)
+# Partial (three-state) ballots, Section 2.3. Represented as a CardinalBallot
+# under the convention: +1 approved, -1 disapproved, 0 (or absent) hidden.
 # ---------------------------------------------------------------------------
 class TestPartialBallot:
-    def test_states_partition_projects(self):
+    def test_scores_follow_convention(self):
+        # The whole point of the encoding: +1 = approve, -1 = disapprove,
+        # 0 = unknown. Pin it down so the convention can't silently drift.
         p = make_projects([("p1", 1), ("p2", 1), ("p3", 1)])
-        b = PartialApprovalBallot(
+        b = partial_ballot(
             approved={p["p1"]}, disapproved={p["p2"]}, hidden={p["p3"]}
         )
-        assert b.approved == {p["p1"]}
-        assert b.disapproved == {p["p2"]}
-        assert b.hidden == {p["p3"]}
-        assert b.exposed == {p["p1"], p["p2"]}
-        assert (b.approved | b.disapproved | b.hidden) == set(p.values())
+        assert b[p["p1"]] == APPROVAL == 1
+        assert b[p["p2"]] == DISAPPROVAL == -1
+        assert b[p["p3"]] == HIDDEN == 0
+
+    def test_states_partition_projects(self):
+        p = make_projects([("p1", 1), ("p2", 1), ("p3", 1)])
+        inst = Instance(p.values(), budget_limit=3)
+        b = partial_ballot(
+            approved={p["p1"]}, disapproved={p["p2"]}, hidden={p["p3"]}
+        )
+        assert approved_projects(b) == {p["p1"]}
+        assert disapproved_projects(b) == {p["p2"]}
+        assert hidden_projects(b, inst) == {p["p3"]}
+        assert exposed_projects(b) == {p["p1"], p["p2"]}
+        assert (
+            approved_projects(b) | disapproved_projects(b) | hidden_projects(b, inst)
+        ) == set(p.values())
+
+    def test_absent_project_is_hidden(self):
+        # A project never mentioned in the ballot is hidden, just like an
+        # explicit 0 - both belong to H_v.
+        p = make_projects([("p1", 1), ("p2", 1), ("p3", 1)])
+        inst = Instance(p.values(), budget_limit=3)
+        b = partial_ballot(approved={p["p1"]}, disapproved={p["p2"]})  # p3 absent
+        assert hidden_projects(b, inst) == {p["p3"]}
 
     def test_as_approval_ballot_keeps_only_approvals(self):
         p = make_projects([("p1", 1), ("p2", 1)])
-        b = PartialApprovalBallot(approved={p["p1"]}, disapproved={p["p2"]})
-        ab = b.as_approval_ballot()
+        b = partial_ballot(approved={p["p1"]}, disapproved={p["p2"]})
+        ab = as_approval_ballot(b)
         assert isinstance(ab, ApprovalBallot)
         assert set(ab) == {p["p1"]}
 
     def test_reveal_example2_4(self):
-        # Example 2.4: true approvals {p1,p2}, exposed {p1,p3}.
+        # Example 2.4: full ballot {p1,p2}, exposed set {p1,p3}.
         p = make_projects([("p1", 1), ("p2", 1), ("p3", 1), ("p4", 1)])
         inst = Instance(p.values(), budget_limit=4)
         b = reveal_ballot(inst, {p["p1"], p["p2"]}, {p["p1"], p["p3"]})
-        assert b.approved == {p["p1"]}
-        assert b.disapproved == {p["p3"]}
-        assert b.hidden == {p["p2"], p["p4"]}
-        assert b.exposed == {p["p1"], p["p3"]}
+        assert approved_projects(b) == {p["p1"]}
+        assert disapproved_projects(b) == {p["p3"]}
+        assert hidden_projects(b, inst) == {p["p2"], p["p4"]}
+        assert exposed_projects(b) == {p["p1"], p["p3"]}
 
 
 # ---------------------------------------------------------------------------
@@ -352,7 +383,7 @@ class TestPredictByMajority:
         lv = ApprovalProfile(
             [ApprovalBallot([p["p1"], p["p2"]]), ApprovalBallot([p["p1"], p["p2"]])]
         )
-        partial = PartialApprovalBallot(hidden=set(p.values()))
+        partial = partial_ballot(hidden=set(p.values()))
         pred = predict_by_majority(inst, lv, partial)
         assert set(pred) == {p["p1"], p["p2"]}
 
@@ -361,7 +392,7 @@ class TestPredictByMajority:
         inst = Instance(p.values(), budget_limit=3)
         # LV would reject p3 (0%), but the voter explicitly approved it.
         lv = ApprovalProfile([ApprovalBallot([p["p1"]]), ApprovalBallot([p["p1"]])])
-        partial = PartialApprovalBallot(
+        partial = partial_ballot(
             approved={p["p3"]}, hidden={p["p1"], p["p2"]}
         )
         pred = predict_by_majority(inst, lv, partial)
@@ -373,7 +404,7 @@ class TestPredictByMajority:
         # LV approves both p1 and p2 unanimously, but the voter explicitly
         # disapproved p1; p2 is hidden and should be predicted as approved.
         lv = ApprovalProfile([ApprovalBallot([p["p1"], p["p2"]])] * 3)
-        partial = PartialApprovalBallot(disapproved={p["p1"]}, hidden={p["p2"]})
+        partial = partial_ballot(disapproved={p["p1"]}, hidden={p["p2"]})
         pred = predict_by_majority(inst, lv, partial)
         assert p["p1"] not in pred  # the explicit disapproval is honoured
         assert p["p2"] in pred      # hidden + LV majority -> approved
@@ -399,7 +430,7 @@ class TestLibraryPredictors:
         p = make_projects([("p1", 4), ("p2", 4), ("p3", 6)])
         inst = Instance(p.values(), budget_limit=6)
         lv = ApprovalProfile([ApprovalBallot([p["p1"], p["p2"]])] * 4)
-        partial = PartialApprovalBallot(hidden=set(p.values()))
+        partial = partial_ballot(hidden=set(p.values()))
         pred = predictor(inst, lv, partial)
         assert set(pred) == {p["p1"], p["p2"]}
 
@@ -410,7 +441,7 @@ class TestLibraryPredictors:
         p = make_projects([("p1", 1), ("p2", 1), ("p3", 1)])
         inst = Instance(p.values(), budget_limit=3)
         lv = ApprovalProfile([ApprovalBallot([p["p1"]])] * 3)
-        partial = PartialApprovalBallot(
+        partial = partial_ballot(
             approved={p["p3"]}, disapproved={p["p1"]}, hidden={p["p2"]}
         )
         pred = predictor(inst, lv, partial)
@@ -439,30 +470,6 @@ class TestRecommend:
         assert set(bundle) <= set(p.values())
         assert sum(proj.cost for proj in bundle) <= inst.budget_limit
         assert len(bundle) > 0
-
-
-# ---------------------------------------------------------------------------
-# symmetric_distance
-# ---------------------------------------------------------------------------
-class TestSymmetricDistance:
-    def test_identical_bundles(self):
-        p = make_projects([("p1", 1), ("p2", 1)])
-        assert symmetric_distance(set(p.values()), set(p.values())) == 0
-        # bundles differing by one project have distance 1.
-        assert symmetric_distance(set(p.values()), {p["p1"]}) == 1
-
-    def test_paper_toy_examples(self):
-        a, b, c, d, e = (Project(x, 1) for x in "abcde")
-        assert symmetric_distance({a, b, c}, {b, a, c}) == 0
-        # NB: the paper's text prints 1 here, but the symmetric difference of
-        # {a,b,c} and {a,c,d} is {b,d}, i.e. 2 (a typo in the paper).
-        assert symmetric_distance({a, b, c}, {a, c, d}) == 2
-        assert symmetric_distance({a, b, c}, {a, d, e}) == 4
-
-    def test_large_structured_known_value(self):
-        # rb = first 60, pb = last 60 of 100 -> overlap 20, symmetric diff 80.
-        a = padded_projects(100, cost=1)
-        assert symmetric_distance(set(a[:60]), set(a[40:])) == 80
 
 
 # ---------------------------------------------------------------------------

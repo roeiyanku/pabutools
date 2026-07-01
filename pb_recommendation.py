@@ -3,121 +3,120 @@ An implementation of the algorithms in:
 "A Recommendation System for Participatory Budgeting",
 by Gil Leibiker and Nimrod Talmon (2023), https://optlearnmas23.github.io/files/p17.pdf
 
+Terminology follows the paper: the voters are partitioned into the **Learning
+Voters (LV)**, who already provided their full ballots, and the **Target Voters
+(TV)**, who provide partial ballots. The goal is to estimate the **ideal
+instance** (where every voter provided a full ballot) from the partial one: for
+each TV voter the algorithm reveals k projects into her **exposed set** E_v
+(splitting into the **approval set** A_v and **disapproval set** D_v) and
+predicts her **hidden set** H_v.
+
 Programmer: Roei Yanku
 Date: 2026-06-20.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 from pabutools.election import (
     Instance,
     Project,
     ApprovalProfile,
     ApprovalBallot,
+    CardinalBallot,
 )
 from pabutools.rules import BudgetAllocation
 
+# Model training lives in a separate module (the professor's note b: separate
+# files for training the model and using it). The learning-based predictors
+# below fit their model there and only *use* it here. ``pb_model_training`` is
+# ballot-agnostic (it takes plain project sets), so the import is one-directional
+# and there is no circular dependency.
+from pb_model_training import (
+    train_classification,
+    train_matrix_factorization,
+    train_factorization_machines,
+)
 
-# ---------------------------------------------------------------------------
-# Section 2.3 - Partial ballots (three-state approval ballots).
-# ---------------------------------------------------------------------------
-class PartialApprovalBallot:
+
+# ===========================================================================
+# Section 2.3 - Partial (three-state) ballots, encoded as a CardinalBallot.
+# ===========================================================================
+# A Target Voter answers only k projects, so "unknown" must be distinct from
+# "disapproved" - which a plain approval set (just the approved projects) cannot
+# express. On the pabutools maintainer's advice (Simon Rey) we do NOT add a new
+# ballot type; instead we reuse the existing
+# :py:class:`~pabutools.election.ballot.cardinalballot.CardinalBallot` (a dict of
+# project -> score) under this sign convention:
+#
+#     score > 0   ->  APPROVED     (A_v)   we store +1  (APPROVAL)
+#     score < 0   ->  DISAPPROVED  (D_v)   we store -1  (DISAPPROVAL)
+#     score == 0  ->  HIDDEN       (H_v)   we store  0  (HIDDEN)
+#
+# A project simply absent from the ballot is also HIDDEN. This convention is not
+# self-evident, so never hand-write the scores: build ballots with
+# ``partial_ballot`` / ``reveal_ballot`` and read them back with the
+# ``*_projects`` accessors / ``as_approval_ballot``.
+
+#: Score stored for an approved project (A_v). Any strictly positive score works.
+APPROVAL = 1
+#: Score stored for a disapproved project (D_v). Any strictly negative score works.
+DISAPPROVAL = -1
+#: Score stored for a hidden project (H_v); absent projects mean the same.
+HIDDEN = 0
+
+
+def partial_ballot(
+    approved: Iterable[Project] = (),
+    disapproved: Iterable[Project] = (),
+    hidden: Iterable[Project] = (),
+) -> CardinalBallot:
     """
-    A three-state approval ballot (Section 2.3), splitting the projects into the
-    approval set A_v (``approved``), the disapproval set D_v (``disapproved``)
-    and the unknown set H_v (``hidden``). They partition P (A_v ∪ D_v ∪ H_v = P)
-    and the exposed set is E_v = A_v ∪ D_v. pabutools' ApprovalBallot cannot
-    express this (no disapproved/unknown distinction), so this helper class is
-    added here.
-
-    Parameters
-    ----------
-        approved : Iterable[:py:class:`~pabutools.election.instance.Project`], optional
-            The projects the voter approves (A_v). Defaults to ``()``.
-        disapproved : Iterable[:py:class:`~pabutools.election.instance.Project`], optional
-            The projects the voter disapproves (D_v). Defaults to ``()``.
-        hidden : Iterable[:py:class:`~pabutools.election.instance.Project`], optional
-            The projects whose preference is unknown (H_v). Defaults to ``()``.
-
-    Attributes
-    ----------
-        approved : set[:py:class:`~pabutools.election.instance.Project`]
-            The approval set A_v.
-        disapproved : set[:py:class:`~pabutools.election.instance.Project`]
-            The disapproval set D_v.
-        hidden : set[:py:class:`~pabutools.election.instance.Project`]
-            The hidden set H_v.
+    Build a partial ballot from the three explicit sets, hiding the convention:
+    approved projects get :data:`APPROVAL`, disapproved get :data:`DISAPPROVAL`,
+    hidden get :data:`HIDDEN`. This is the intended way to create a partial
+    ballot - callers name the three sets instead of writing raw scores.
 
     Examples
     --------
     >>> p1, p2, p3 = Project("p1", 1), Project("p2", 1), Project("p3", 1)
-    >>> b = PartialApprovalBallot(approved={p1}, disapproved={p2}, hidden={p3})
-    >>> b.exposed == {p1, p2}
-    True
-    >>> (b.approved | b.disapproved | b.hidden) == {p1, p2, p3}
+    >>> b = partial_ballot(approved={p1}, disapproved={p2}, hidden={p3})
+    >>> b[p1], b[p2], b[p3]
+    (1, -1, 0)
+    >>> exposed_projects(b) == {p1, p2}
     True
     """
-
-    def __init__(self, approved=(), disapproved=(), hidden=()) -> None:
-        self.approved: set[Project] = set()  # Empty implementation
-        self.disapproved: set[Project] = set()  # Empty implementation
-        self.hidden: set[Project] = set()  # Empty implementation
-
-    @property
-    def exposed(self) -> set[Project]:
-        """The exposed set E_v = A_v ∪ D_v (the projects the voter answered)."""
-        return set()  # Empty implementation
-
-    def as_approval_ballot(self) -> ApprovalBallot:
-        """
-        The pabutools approval ballot made of the approved projects A_v, so that
-        a (completed) partial ballot can be fed to approval-based voting rules.
-        """
-        return ApprovalBallot()  # Empty implementation
-
-    def __eq__(self, other) -> bool:
-        return (
-            isinstance(other, PartialApprovalBallot)
-            and self.approved == other.approved
-            and self.disapproved == other.disapproved
-            and self.hidden == other.hidden
-        )
-
-    def __repr__(self) -> str:
-        return (
-            f"PartialApprovalBallot(approved={sorted(map(str, self.approved))}, "
-            f"disapproved={sorted(map(str, self.disapproved))}, "
-            f"hidden={sorted(map(str, self.hidden))})"
-        )
+    return CardinalBallot()  # Empty implementation
 
 
 def reveal_ballot(
     instance: Instance,
-    true_approval: set[Project],
+    full_ballot: set[Project],
     exposed: set[Project],
-) -> PartialApprovalBallot:
+) -> CardinalBallot:
     """
-    Build the partial ballot exposing a set of projects of a voter whose true
-    approval set is known (Section 2.3): A_v = exposed ∩ true,
-    D_v = exposed \\ true, H_v = P \\ exposed.
+    Build the partial ballot exposing a set of projects of a voter whose full
+    ballot in the ideal instance is known (Section 2.3): A_v = E_v ∩ full_ballot,
+    D_v = E_v \\ full_ballot, H_v = P \\ E_v.
 
     Parameters
     ----------
         instance : :py:class:`~pabutools.election.instance.Instance`
             The PB instance (used as the universe of projects P).
-        true_approval : set[:py:class:`~pabutools.election.instance.Project`]
-            The projects the voter truly approves.
+        full_ballot : set[:py:class:`~pabutools.election.instance.Project`]
+            The voter's full ballot - her approval set A_v in the ideal instance.
         exposed : set[:py:class:`~pabutools.election.instance.Project`]
-            The projects revealed for this voter (E_v).
+            The projects revealed for this voter (the exposed set E_v).
 
     Returns
     -------
-        PartialApprovalBallot
-            The corresponding three-state ballot.
+        :py:class:`~pabutools.election.ballot.cardinalballot.CardinalBallot`
+            The corresponding three-state ballot under the sign convention.
 
     Examples
     --------
-    Example 2.4 from the paper: P = {p1, p2, p3, p4}, the voter truly approves
+    Example 2.4 from the paper: P = {p1, p2, p3, p4}, the voter's full ballot is
     {p1, p2}, and {p1, p3} is exposed. Then p1 is approved, p3 disapproved, and
     p2, p4 remain hidden.
 
@@ -125,10 +124,43 @@ def reveal_ballot(
     ...                   Project("p3", 1), Project("p4", 1))
     >>> inst = Instance([p1, p2, p3, p4], budget_limit=4)
     >>> b = reveal_ballot(inst, {p1, p2}, {p1, p3})
-    >>> b.approved == {p1}, b.disapproved == {p3}, b.hidden == {p2, p4}
-    (True, True, True)
+    >>> approved_projects(b) == {p1}, disapproved_projects(b) == {p3}
+    (True, True)
+    >>> hidden_projects(b, inst) == {p2, p4}
+    True
     """
-    return PartialApprovalBallot()  # Empty implementation
+    return CardinalBallot()  # Empty implementation
+
+
+def approved_projects(ballot: CardinalBallot) -> set[Project]:
+    """The approval set A_v: the projects with a strictly positive score."""
+    return set()  # Empty implementation
+
+
+def disapproved_projects(ballot: CardinalBallot) -> set[Project]:
+    """The disapproval set D_v: the projects with a strictly negative score."""
+    return set()  # Empty implementation
+
+
+def exposed_projects(ballot: CardinalBallot) -> set[Project]:
+    """The exposed set E_v = A_v ∪ D_v: the projects with a non-zero score."""
+    return set()  # Empty implementation
+
+
+def hidden_projects(ballot: CardinalBallot, instance: Instance) -> set[Project]:
+    """
+    The hidden set H_v = P \\ E_v: every project of the instance that the voter
+    was not asked about (score 0 or absent from the ballot).
+    """
+    return set()  # Empty implementation
+
+
+def as_approval_ballot(ballot: CardinalBallot) -> ApprovalBallot:
+    """
+    The pabutools approval ballot made of the approved projects A_v, so that a
+    (completed) partial ballot can be fed to approval-based voting rules.
+    """
+    return ApprovalBallot()  # Empty implementation
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +172,13 @@ def approval_scores(
     """
     Definition 2.1 (Approval scores): the approval score of a project is the
     number of voters that approve it.
+
+    This is exactly pabutools'
+    :py:meth:`~pabutools.election.profile.approvalprofile.AbstractApprovalProfile.approval_scores`,
+    so we delegate to the library instead of re-counting the ballots ourselves.
+    The only addition is that projects approved by nobody (absent from the
+    library's dictionary) are filled in with a score of 0, so every project of
+    the instance is present in the result.
 
     Parameters
     ----------
@@ -256,44 +295,42 @@ def greedy_approval(
 # ---------------------------------------------------------------------------
 def random_setup(
     instance: Instance,
-    tv_ballots: dict[str, set[Project]],
     k: int,
     seed: int | None = None,
-) -> dict[str, set[Project]]:
+) -> set[Project]:
     """
-    Algorithm 1 - Random setup (Section 3.1.1): expose k projects chosen
-    uniformly at random from P for each TV voter (the rest is predicted later).
+    Algorithm 1 - Random setup (Section 3.1.1): the exposed set E_v of a Target
+    Voter, made of k projects chosen uniformly at random from P (the rest is
+    predicted later). Called once per TV voter, so a different draw can be drawn
+    for each; it needs no ballot, since the choice is random.
 
     Parameters
     ----------
         instance : :py:class:`~pabutools.election.instance.Instance`
-            The PB instance.
-        tv_ballots : dict[str, set[:py:class:`~pabutools.election.instance.Project`]]
-            The true (hidden) approval set of every TV voter, keyed by voter id.
-            Projects outside the set are disapproved by that voter.
+            The PB instance (the universe of projects P).
         k : int
-            The number of projects to expose per voter.
+            The number of projects to expose.
         seed : int, optional
             Seed for the random generator, for reproducibility.
 
     Returns
     -------
-        dict[str, set[:py:class:`~pabutools.election.instance.Project`]]
-            For each TV voter, the set of k exposed projects.
+        set[:py:class:`~pabutools.election.instance.Project`]
+            The exposed set E_v: k projects drawn uniformly at random from P.
 
     Examples
     --------
-    Example 5 from the paper: a single TV voter v4, k = 2. Whatever the draw,
-    exactly two projects are exposed and they are real projects of the instance.
+    Example 5 from the paper: k = 2. Whatever the draw, exactly two projects are
+    exposed and they are real projects of the instance.
 
     >>> p1, p2, p3, p4 = (Project("p1", 2), Project("p2", 2),
     ...                   Project("p3", 3), Project("p4", 3))
     >>> inst = Instance([p1, p2, p3, p4], budget_limit=6)
-    >>> exposed = random_setup(inst, {"v4": {p1, p2}}, k=2, seed=0)
-    >>> len(exposed["v4"]) == 2 and exposed["v4"] <= {p1, p2, p3, p4}
+    >>> exposed = random_setup(inst, k=2, seed=0)
+    >>> len(exposed) == 2 and exposed <= {p1, p2, p3, p4}
     True
     """
-    return {}  # Empty implementation
+    return set()  # Empty implementation
 
 
 # ---------------------------------------------------------------------------
@@ -301,25 +338,28 @@ def random_setup(
 # ---------------------------------------------------------------------------
 def offline_popularity(
     instance: Instance, lv_profile: ApprovalProfile, k: int
-) -> list[Project]:
+) -> set[Project]:
     """
-    Algorithm 2 - Offline revealing by popularity (Section 3.1.2). Exposes, for
-    every TV voter, the k most approved projects among the LV voters, i.e.
-    {sigma_1, ..., sigma_k}.
+    Algorithm 2 - Offline revealing by popularity (Section 3.1.2). The exposed
+    set E = {sigma_1, ..., sigma_k}: the k most approved projects among the LV
+    voters. The same set is exposed to every Target Voter, so it depends only on
+    the LV profile (the score ordering sigma is used only to pick the top k; the
+    exposed set itself is unordered).
 
     Parameters
     ----------
         instance : :py:class:`~pabutools.election.instance.Instance`
             The PB instance.
         lv_profile : :py:class:`~pabutools.election.profile.approvalprofile.ApprovalProfile`
-            The full ballots of the LV voters.
+            The full ballots of the Learning Voters (LV).
         k : int
             The number of projects to expose.
 
     Returns
     -------
-        list[:py:class:`~pabutools.election.instance.Project`]
-            The k most popular projects, ordered by score (ties by name).
+        set[:py:class:`~pabutools.election.instance.Project`]
+            The exposed set E of the k most popular projects (ties broken by name
+            when picking the top k).
 
     Examples
     --------
@@ -331,33 +371,34 @@ def offline_popularity(
     >>> lv = ApprovalProfile([ApprovalBallot([p1, p3]),
     ...                       ApprovalBallot([p1, p2]),
     ...                       ApprovalBallot([p1])])
-    >>> offline_popularity(inst, lv, k=1)
-    [p1]
+    >>> offline_popularity(inst, lv, k=1) == {p1}
+    True
     """
-    return []  # Empty implementation
+    return set()  # Empty implementation
 
 
 def offline_consensus(
     instance: Instance, lv_profile: ApprovalProfile, k: int
-) -> list[Project]:
+) -> set[Project]:
     """
-    Algorithm 3 - Offline revealing by consensus (Section 3.1.2). Exposes the k
-    projects with the highest consensus level among the LV voters, i.e.
-    {gamma_1, ..., gamma_k}.
+    Algorithm 3 - Offline revealing by consensus (Section 3.1.2). The exposed set
+    E = {gamma_1, ..., gamma_k}: the k projects with the highest consensus level
+    among the LV voters. The same set is exposed to every Target Voter.
 
     Parameters
     ----------
         instance : :py:class:`~pabutools.election.instance.Instance`
             The PB instance.
         lv_profile : :py:class:`~pabutools.election.profile.approvalprofile.ApprovalProfile`
-            The full ballots of the LV voters.
+            The full ballots of the Learning Voters (LV).
         k : int
             The number of projects to expose.
 
     Returns
     -------
-        list[:py:class:`~pabutools.election.instance.Project`]
-            The k projects most in consensus, ordered by level (ties by name).
+        set[:py:class:`~pabutools.election.instance.Project`]
+            The exposed set E of the k projects most in consensus (ties broken by
+            name when picking the top k).
 
     Examples
     --------
@@ -368,33 +409,35 @@ def offline_consensus(
     >>> inst = Instance([p1, p2, p3], budget_limit=3)
     >>> lv = ApprovalProfile([ApprovalBallot([p1, p2]), ApprovalBallot([p1]),
     ...                       ApprovalBallot([p1, p2]), ApprovalBallot([p1])])
-    >>> offline_consensus(inst, lv, k=1)
-    [p1]
+    >>> offline_consensus(inst, lv, k=1) == {p1}
+    True
     """
-    return []  # Empty implementation
+    return set()  # Empty implementation
 
 
 def offline_controversiality(
     instance: Instance, lv_profile: ApprovalProfile, k: int
-) -> list[Project]:
+) -> set[Project]:
     """
-    Algorithm 4 - Offline revealing by controversiality (Section 3.1.2): expose
-    the k projects *least* in consensus among the LV voters,
-    {gamma_{m-k+1}, ..., gamma_m} (the hardest to predict, so asked directly).
+    Algorithm 4 - Offline revealing by controversiality (Section 3.1.2). The
+    exposed set E = {gamma_{m-k+1}, ..., gamma_m}: the k projects *least* in
+    consensus among the LV voters (the hardest to predict, so asked directly).
+    The same set is exposed to every Target Voter.
 
     Parameters
     ----------
         instance : :py:class:`~pabutools.election.instance.Instance`
             The PB instance.
         lv_profile : :py:class:`~pabutools.election.profile.approvalprofile.ApprovalProfile`
-            The full ballots of the LV voters.
+            The full ballots of the Learning Voters (LV).
         k : int
             The number of projects to expose.
 
     Returns
     -------
-        list[:py:class:`~pabutools.election.instance.Project`]
-            The k most controversial projects, ordered by increasing consensus.
+        set[:py:class:`~pabutools.election.instance.Project`]
+            The exposed set E of the k most controversial projects (ties broken
+            by name when picking the bottom k).
 
     Examples
     --------
@@ -405,10 +448,10 @@ def offline_controversiality(
     >>> inst = Instance([p1, p2, p3], budget_limit=3)
     >>> lv = ApprovalProfile([ApprovalBallot([p1, p2]), ApprovalBallot([p1]),
     ...                       ApprovalBallot([p1, p2]), ApprovalBallot([p1])])
-    >>> offline_controversiality(inst, lv, k=1)
-    [p2]
+    >>> offline_controversiality(inst, lv, k=1) == {p2}
+    True
     """
-    return []  # Empty implementation
+    return set()  # Empty implementation
 
 
 # ---------------------------------------------------------------------------
@@ -417,46 +460,49 @@ def offline_controversiality(
 def online_adaptive_controversial(
     instance: Instance,
     lv_profile: ApprovalProfile,
-    tv_ballot: set[Project],
+    full_ballot: set[Project],
     k: int,
-) -> list[Project]:
+) -> set[Project]:
     """
-    Algorithm 5 - Online adaptive-controversial setup (Section 3.1.3): in each of
-    k iterations recompute the most controversial project given the LV ballots
-    and the answers already revealed, then ask about it (each answer affects the
-    next question).
+    Algorithm 5 - Online adaptive-controversial setup (Section 3.1.3): the
+    exposed set E_v of one Target Voter, built in k iterations. In each iteration
+    the most controversial project is recomputed given the LV ballots and the
+    answers already revealed, then asked about (each answer affects the next
+    question, hence "adaptive"). The voter's full ballot is needed to simulate
+    those answers.
 
     Parameters
     ----------
         instance : :py:class:`~pabutools.election.instance.Instance`
             The PB instance.
         lv_profile : :py:class:`~pabutools.election.profile.approvalprofile.ApprovalProfile`
-            The full ballots of the LV voters.
-        tv_ballot : set[:py:class:`~pabutools.election.instance.Project`]
-            The true (hidden) approval set of the TV voter being queried.
+            The full ballots of the Learning Voters (LV).
+        full_ballot : set[:py:class:`~pabutools.election.instance.Project`]
+            The full ballot of the Target Voter (TV) being queried - her approval
+            set A_v in the ideal instance - used to answer each adaptive question.
         k : int
             The number of iterations / projects to expose.
 
     Returns
     -------
-        list[:py:class:`~pabutools.election.instance.Project`]
-            The k exposed projects, in the order they were asked.
+        set[:py:class:`~pabutools.election.instance.Project`]
+            The exposed set E_v of the k projects that ended up being asked.
 
     Examples
     --------
     Example 9 from the paper: 4 LV voters, one TV voter v5, k = 2. p1, p2, p3
     are all tied as most controversial; the first question (tie broken by name)
-    is p1, and after the voter's answer the second question is p2.
+    is p1, and after the voter's answer the next is p2, so E_v = {p1, p2}.
 
     >>> p1, p2, p3, p4 = (Project("p1", 1), Project("p2", 1),
     ...                   Project("p3", 1), Project("p4", 1))
     >>> inst = Instance([p1, p2, p3, p4], budget_limit=4)
     >>> lv = ApprovalProfile([ApprovalBallot([p1, p2]), ApprovalBallot([p1, p3]),
     ...                       ApprovalBallot([p2, p3]), ApprovalBallot([])])
-    >>> online_adaptive_controversial(inst, lv, {p1, p2}, k=2)
-    [p1, p2]
+    >>> online_adaptive_controversial(inst, lv, {p1, p2}, k=2) == {p1, p2}
+    True
     """
-    return []  # Empty implementation
+    return set()  # Empty implementation
 
 
 # ---------------------------------------------------------------------------
@@ -465,7 +511,7 @@ def online_adaptive_controversial(
 def predict_by_majority(
     instance: Instance,
     lv_profile: ApprovalProfile,
-    ballot: PartialApprovalBallot,
+    ballot: CardinalBallot,
 ) -> ApprovalBallot:
     """
     Prediction module (Section 2.1). Completes a single partial TV ballot into a
@@ -479,8 +525,9 @@ def predict_by_majority(
             The PB instance.
         lv_profile : :py:class:`~pabutools.election.profile.approvalprofile.ApprovalProfile`
             The full ballots of the LV voters, used as the training data.
-        ballot : PartialApprovalBallot
-            The partial ballot of the TV voter to complete.
+        ballot : :py:class:`~pabutools.election.ballot.cardinalballot.CardinalBallot`
+            The Target Voter's partial ballot to complete (the +1/-1/0 partial
+            ballot built by ``partial_ballot`` / ``reveal_ballot``).
 
     Returns
     -------
@@ -496,7 +543,7 @@ def predict_by_majority(
     >>> p1, p2, p3 = Project("p1", 4), Project("p2", 4), Project("p3", 6)
     >>> inst = Instance([p1, p2, p3], budget_limit=6)
     >>> lv = ApprovalProfile([ApprovalBallot([p1, p2]), ApprovalBallot([p1, p2])])
-    >>> partial = PartialApprovalBallot(hidden={p1, p2, p3})
+    >>> partial = partial_ballot(hidden={p1, p2, p3})
     >>> predict_by_majority(inst, lv, partial) == {p1, p2}
     True
     """
@@ -506,16 +553,16 @@ def predict_by_majority(
 def predict_by_classification(
     instance: Instance,
     lv_profile: ApprovalProfile,
-    ballot: PartialApprovalBallot,
+    ballot: CardinalBallot,
 ) -> ApprovalBallot:
     """
     Prediction module - binary classification (Section 2.1.1): predict each
     hidden project with a per-project binary classifier trained on the LV ballots
     (features = votes on the exposed projects, label = vote on the target), then
     applied to the TV voter. Exposed approvals A_v are kept and exposed
-    disapprovals D_v stay rejected. Backed by the external ``xgboost`` library
-    (:py:class:`xgboost.XGBClassifier`, class-weighted loss for the imbalanced
-    data), imported inside the implementation.
+    disapprovals D_v stay rejected. The classifiers are fitted by
+    :py:func:`pb_model_training.train_classification` (backed by ``xgboost``);
+    this function only *applies* the trained model.
 
     Parameters
     ----------
@@ -523,8 +570,9 @@ def predict_by_classification(
             The PB instance.
         lv_profile : :py:class:`~pabutools.election.profile.approvalprofile.ApprovalProfile`
             The full ballots of the LV voters, used as the training data.
-        ballot : PartialApprovalBallot
-            The partial ballot of the TV voter to complete.
+        ballot : :py:class:`~pabutools.election.ballot.cardinalballot.CardinalBallot`
+            The Target Voter's partial ballot to complete (the +1/-1/0 partial
+            ballot built by ``partial_ballot`` / ``reveal_ballot``).
 
     Returns
     -------
@@ -540,25 +588,27 @@ def predict_by_classification(
     >>> p1, p2, p3 = Project("p1", 4), Project("p2", 4), Project("p3", 6)
     >>> inst = Instance([p1, p2, p3], budget_limit=6)
     >>> lv = ApprovalProfile([ApprovalBallot([p1, p2]), ApprovalBallot([p1, p2])])
-    >>> partial = PartialApprovalBallot(hidden={p1, p2, p3})
+    >>> partial = partial_ballot(hidden={p1, p2, p3})
     >>> predict_by_classification(inst, lv, partial) == {p1, p2}
     True
     """
+    train_classification(instance, lv_profile, exposed_projects(ballot))  # model used below
     return ApprovalBallot()  # Empty implementation
 
 
 def predict_by_matrix_factorization(
     instance: Instance,
     lv_profile: ApprovalProfile,
-    ballot: PartialApprovalBallot,
+    ballot: CardinalBallot,
 ) -> ApprovalBallot:
     """
     Prediction module - collaborative filtering via Matrix Factorization
     (Section 2.1.2): build the sparse user-item matrix from the LV ballots and
     exposed TV votes (approve=1, disapprove=0), factorise it, and predict a
     hidden project as approved iff its reconstructed score is >= 0.5. Exposed
-    approvals A_v are kept and exposed disapprovals D_v stay rejected. Backed by
-    the external ``scikit-surprise`` library (:py:class:`surprise.SVD`).
+    approvals A_v are kept and exposed disapprovals D_v stay rejected. The model
+    is fitted by :py:func:`pb_model_training.train_matrix_factorization` (backed
+    by ``scikit-surprise``); this function only *applies* the trained model.
 
     Parameters
     ----------
@@ -566,8 +616,9 @@ def predict_by_matrix_factorization(
             The PB instance.
         lv_profile : :py:class:`~pabutools.election.profile.approvalprofile.ApprovalProfile`
             The full ballots of the LV voters, used as the training data.
-        ballot : PartialApprovalBallot
-            The partial ballot of the TV voter to complete.
+        ballot : :py:class:`~pabutools.election.ballot.cardinalballot.CardinalBallot`
+            The Target Voter's partial ballot to complete (the +1/-1/0 partial
+            ballot built by ``partial_ballot`` / ``reveal_ballot``).
 
     Returns
     -------
@@ -584,24 +635,30 @@ def predict_by_matrix_factorization(
     ...                   Project("p3", 4), Project("p4", 4))
     >>> inst = Instance([p1, p2, p3, p4], budget_limit=6)
     >>> lv = ApprovalProfile([ApprovalBallot([p1, p2])] * 3)
-    >>> partial = PartialApprovalBallot(hidden={p1, p2, p3, p4})
+    >>> partial = partial_ballot(hidden={p1, p2, p3, p4})
     >>> predict_by_matrix_factorization(inst, lv, partial) == {p1, p2}
     True
     """
+    train_matrix_factorization(
+        instance, lv_profile, approved_projects(ballot), disapproved_projects(ballot)
+    )  # model used below
     return ApprovalBallot()  # Empty implementation
 
 
 def predict_by_factorization_machines(
     instance: Instance,
     lv_profile: ApprovalProfile,
-    ballot: PartialApprovalBallot,
+    ballot: CardinalBallot,
 ) -> ApprovalBallot:
     """
     Prediction module - hybrid Factorization Machines (Section 2.1.2): like MF
     but with a linear term plus pairwise latent interactions and optional side
     features, predicting a hidden project as approved iff the FM score is >= 0.5.
     Exposed approvals A_v are kept and exposed disapprovals D_v stay rejected.
-    Backed by an external FM library (e.g. ``lightfm`` / ``fastFM``).
+    The model is fitted by
+    :py:func:`pb_model_training.train_factorization_machines` (backed by an
+    external FM library, e.g. ``lightfm`` / ``fastFM``); this function only
+    *applies* the trained model.
 
     Parameters
     ----------
@@ -609,8 +666,9 @@ def predict_by_factorization_machines(
             The PB instance.
         lv_profile : :py:class:`~pabutools.election.profile.approvalprofile.ApprovalProfile`
             The full ballots of the LV voters, used as the training data.
-        ballot : PartialApprovalBallot
-            The partial ballot of the TV voter to complete.
+        ballot : :py:class:`~pabutools.election.ballot.cardinalballot.CardinalBallot`
+            The Target Voter's partial ballot to complete (the +1/-1/0 partial
+            ballot built by ``partial_ballot`` / ``reveal_ballot``).
 
     Returns
     -------
@@ -625,10 +683,13 @@ def predict_by_factorization_machines(
     >>> p1, p2, p3 = Project("p1", 4), Project("p2", 4), Project("p3", 6)
     >>> inst = Instance([p1, p2, p3], budget_limit=6)
     >>> lv = ApprovalProfile([ApprovalBallot([p1, p2]), ApprovalBallot([p1, p2])])
-    >>> partial = PartialApprovalBallot(hidden={p1, p2, p3})
+    >>> partial = partial_ballot(hidden={p1, p2, p3})
     >>> predict_by_factorization_machines(inst, lv, partial) == {p1, p2}
     True
     """
+    train_factorization_machines(
+        instance, lv_profile, approved_projects(ballot), disapproved_projects(ballot)
+    )  # model used below
     return ApprovalBallot()  # Empty implementation
 
 
@@ -653,7 +714,8 @@ def recommend(
         lv_profile : :py:class:`~pabutools.election.profile.approvalprofile.ApprovalProfile`
             The full ballots of the LV voters.
         tv_ballots : dict[str, set[:py:class:`~pabutools.election.instance.Project`]]
-            The true (hidden) approval set of every TV voter, keyed by voter id.
+            The full ballot of every Target Voter (TV) - her approval set A_v in
+            the ideal instance - keyed by voter id.
         k : int
             The number of projects to expose per TV voter.
 
@@ -681,38 +743,6 @@ def recommend(
 # ---------------------------------------------------------------------------
 # Section 5.2 - Bundle evaluation metrics.
 # ---------------------------------------------------------------------------
-def symmetric_distance(
-    real_bundle: set[Project], predicted_bundle: set[Project]
-) -> int:
-    """
-    Section 5.2.1 - Symmetric distance between the real winning bundle and the
-    predicted one: the size of their symmetric difference.
-
-    Parameters
-    ----------
-        real_bundle : set[:py:class:`~pabutools.election.instance.Project`]
-            The bundle obtained from the real (full) ballots.
-        predicted_bundle : set[:py:class:`~pabutools.election.instance.Project`]
-            The bundle obtained from the predicted ballots.
-
-    Returns
-    -------
-        int
-            The number of projects in exactly one of the two bundles.
-
-    Examples
-    --------
-    Example 10 (a perfect prediction) and Example 11 (a complete failure):
-
-    >>> p1, p2, p3 = Project("p1", 1), Project("p2", 1), Project("p3", 1)
-    >>> symmetric_distance({p1, p2}, {p1, p2})
-    0
-    >>> symmetric_distance({p1}, {p3})
-    2
-    """
-    return 0  # Empty implementation
-
-
 def fractional_allocation_score(
     real_bundle: set[Project], predicted_bundle: set[Project], budget_limit: int
 ) -> float:
