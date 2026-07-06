@@ -9,6 +9,8 @@ Date: 2026-06-20.
 
 from __future__ import annotations
 
+import logging
+import random
 from collections.abc import Iterable
 
 from pabutools.election import (
@@ -17,13 +19,25 @@ from pabutools.election import (
     ApprovalProfile,
     ApprovalBallot,
     CardinalBallot,
+    total_cost,
 )
 from pabutools.rules import BudgetAllocation
 
 # Model training lives in a separate module, ``pb_model_training`` (the
 # professor's note b: separate files for training the model and using it). The
-# learning-based predictors below will call its ``train_*`` functions once
-# implemented; at this stage their bodies are empty, so nothing is imported yet.
+# learning-based predictors below delegate the fitting to its ``train_*``
+# functions; ``pb_model_training`` is ballot-agnostic (it takes plain project
+# sets), so the dependency is one-directional and there is no import cycle.
+from pb_model_training import (
+    train_classification,
+    train_matrix_factorization,
+    train_factorization_machines,
+)
+
+# Log the steps of every algorithm at INFO/DEBUG level (see the assignment's
+# logging requirement). Configure a handler in your own script to see them, e.g.
+# ``logging.basicConfig(level=logging.INFO)``.
+logger = logging.getLogger(__name__)
 
 
 # ===========================================================================
@@ -45,10 +59,12 @@ from pabutools.rules import BudgetAllocation
 # ``partial_ballot`` / ``reveal_ballot`` and read them back with the
 # ``*_projects`` accessors / ``as_approval_ballot``.
 
-# Scores stored (to be defined when the module is implemented):
-#   approved project (A_v)    -> +1  (any strictly positive score)
-#   disapproved project (D_v) -> -1  (any strictly negative score)
-#   hidden project (H_v)      ->  0  (absent projects mean the same)
+#: Score stored for an approved project (A_v). Any strictly positive score works.
+APPROVAL = 1
+#: Score stored for a disapproved project (D_v). Any strictly negative score works.
+DISAPPROVAL = -1
+#: Score stored for a hidden project (H_v); absent projects mean the same.
+HIDDEN = 0
 
 
 def partial_ballot(
@@ -71,7 +87,14 @@ def partial_ballot(
     >>> exposed_projects(b) == {p1, p2}
     True
     """
-    return CardinalBallot()  # Empty implementation
+    scores: dict[Project, int] = {}
+    for project in approved:
+        scores[project] = APPROVAL
+    for project in disapproved:
+        scores[project] = DISAPPROVAL
+    for project in hidden:
+        scores[project] = HIDDEN
+    return CardinalBallot(scores)
 
 
 def reveal_ballot(
@@ -113,22 +136,29 @@ def reveal_ballot(
     >>> hidden_projects(b, inst) == {p2, p4}
     True
     """
-    return CardinalBallot()  # Empty implementation
+    approved = exposed & full_ballot          # A_v = E_v ∩ full ballot
+    disapproved = exposed - full_ballot        # D_v = E_v \ full ballot
+    hidden = set(instance) - exposed           # H_v = P \ E_v
+    logger.debug(
+        "reveal_ballot: |E_v|=%d -> |A_v|=%d, |D_v|=%d, |H_v|=%d",
+        len(exposed), len(approved), len(disapproved), len(hidden),
+    )
+    return partial_ballot(approved=approved, disapproved=disapproved, hidden=hidden)
 
 
 def approved_projects(ballot: CardinalBallot) -> set[Project]:
     """The approval set A_v: the projects with a strictly positive score."""
-    return set()  # Empty implementation
+    return {project for project, score in ballot.items() if score > 0}
 
 
 def disapproved_projects(ballot: CardinalBallot) -> set[Project]:
     """The disapproval set D_v: the projects with a strictly negative score."""
-    return set()  # Empty implementation
+    return {project for project, score in ballot.items() if score < 0}
 
 
 def exposed_projects(ballot: CardinalBallot) -> set[Project]:
     """The exposed set E_v = A_v ∪ D_v: the projects with a non-zero score."""
-    return set()  # Empty implementation
+    return {project for project, score in ballot.items() if score != 0}
 
 
 def hidden_projects(ballot: CardinalBallot, instance: Instance) -> set[Project]:
@@ -136,7 +166,7 @@ def hidden_projects(ballot: CardinalBallot, instance: Instance) -> set[Project]:
     The hidden set H_v = P \\ E_v: every project of the instance that the voter
     was not asked about (score 0 or absent from the ballot).
     """
-    return set()  # Empty implementation
+    return set(instance) - exposed_projects(ballot)
 
 
 def as_approval_ballot(ballot: CardinalBallot) -> ApprovalBallot:
@@ -144,7 +174,7 @@ def as_approval_ballot(ballot: CardinalBallot) -> ApprovalBallot:
     The pabutools approval ballot made of the approved projects A_v, so that a
     (completed) partial ballot can be fed to approval-based voting rules.
     """
-    return ApprovalBallot()  # Empty implementation
+    return ApprovalBallot(approved_projects(ballot))
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +219,12 @@ def approval_scores(
     >>> [s[p] for p in (p1, p2, p3)]
     [2, 2, 1]
     """
-    return {}  # Empty implementation
+    # Reuse the library's counting (Definition 2.1), then fill 0 for the
+    # projects that nobody approved so the whole universe P is represented.
+    library_scores = profile.approval_scores()
+    scores = {project: library_scores.get(project, 0) for project in instance}
+    logger.debug("approval_scores: %s", scores)
+    return scores
 
 
 def consensus_levels(
@@ -225,7 +260,57 @@ def consensus_levels(
     >>> [c[p] for p in (p1, p2, p3)]
     [4, 0, 4]
     """
-    return {}  # Empty implementation
+    # consensus(p) = |approvers(p) - disapprovers(p)|. With n voters and
+    # score(p) approvers, disapprovers = n - score(p), so the difference is
+    # |score - (n - score)| = |2*score - n|.
+    n = profile.num_ballots()
+    scores = approval_scores(instance, profile)
+    consensus = {project: abs(2 * scores[project] - n) for project in instance}
+    logger.debug("consensus_levels (n=%d): %s", n, consensus)
+    return consensus
+
+
+def most_popular_projects(
+    instance: Instance, profile: ApprovalProfile
+) -> list[Project]:
+    """
+    The paper's ordering sigma (Section 2.2.3): the projects sorted by decreasing
+    approval score, ties broken lexicographically by project name. sigma_1 is the
+    most popular project, sigma_m the least. Helper used by the greedy rule and by
+    offline revealing-by-popularity.
+
+    Examples
+    --------
+    >>> p1, p2, p3 = Project("p1", 1), Project("p2", 1), Project("p3", 1)
+    >>> inst = Instance([p1, p2, p3], budget_limit=3)
+    >>> prof = ApprovalProfile([ApprovalBallot([p1, p3]), ApprovalBallot([p1])])
+    >>> most_popular_projects(inst, prof)  # scores p1=2, p3=1, p2=0
+    [p1, p3, p2]
+    """
+    scores = approval_scores(instance, profile)
+    return sorted(instance, key=lambda project: (-scores[project], str(project)))
+
+
+def most_consensual_projects(
+    instance: Instance, profile: ApprovalProfile
+) -> list[Project]:
+    """
+    The paper's ordering gamma (Section 2.2.3): the projects sorted by decreasing
+    consensus level, ties broken lexicographically by project name. gamma_1 is the
+    project most in consensus, gamma_m the "most controversial". Helper used by
+    offline revealing-by-consensus and by-controversiality.
+
+    Examples
+    --------
+    >>> p1, p2, p3 = Project("p1", 1), Project("p2", 1), Project("p3", 1)
+    >>> inst = Instance([p1, p2, p3], budget_limit=3)
+    >>> prof = ApprovalProfile([ApprovalBallot([p1, p2]), ApprovalBallot([p1]),
+    ...                         ApprovalBallot([p1, p2]), ApprovalBallot([p1])])
+    >>> most_consensual_projects(inst, prof)  # consensus p1=4, p3=4, p2=0
+    [p1, p3, p2]
+    """
+    consensus = consensus_levels(instance, profile)
+    return sorted(instance, key=lambda project: (-consensus[project], str(project)))
 
 
 # ---------------------------------------------------------------------------
@@ -271,7 +356,22 @@ def greedy_approval(
     >>> sorted(greedy_approval(inst, prof), key=str)
     [p1, p2]
     """
-    return BudgetAllocation()  # Empty implementation
+    # Consider the projects by decreasing approval score (sigma) and fund each
+    # one whose cost still fits the remaining budget (Section 2.2.5).
+    chosen = BudgetAllocation()
+    spent = 0
+    for project in most_popular_projects(instance, profile):
+        if spent + project.cost <= instance.budget_limit:
+            chosen.append(project)
+            spent += project.cost
+            logger.debug("greedy_approval: fund %s (spent %s)", project, spent)
+        else:
+            logger.debug("greedy_approval: skip %s (would exceed budget)", project)
+    logger.info(
+        "greedy_approval: funded %d/%d projects, cost %s of %s",
+        len(chosen), len(instance), spent, instance.budget_limit,
+    )
+    return chosen
 
 
 # ---------------------------------------------------------------------------
@@ -314,7 +414,13 @@ def random_setup(
     >>> len(exposed) == 2 and exposed <= {p1, p2, p3, p4}
     True
     """
-    return set()  # Empty implementation
+    rng = random.Random(seed)
+    # Sort first so the sample is reproducible from the seed (a set has no
+    # deterministic iteration order).
+    population = sorted(instance, key=str)
+    exposed = set(rng.sample(population, k))
+    logger.info("random_setup: exposed %d of %d projects at random", k, len(population))
+    return exposed
 
 
 # ---------------------------------------------------------------------------
@@ -358,7 +464,9 @@ def offline_popularity(
     >>> offline_popularity(inst, lv, k=1) == {p1}
     True
     """
-    return set()  # Empty implementation
+    exposed = set(most_popular_projects(instance, lv_profile)[:k])
+    logger.info("offline_popularity: exposing top-%d popular projects", k)
+    return exposed
 
 
 def offline_consensus(
@@ -396,7 +504,9 @@ def offline_consensus(
     >>> offline_consensus(inst, lv, k=1) == {p1}
     True
     """
-    return set()  # Empty implementation
+    exposed = set(most_consensual_projects(instance, lv_profile)[:k])
+    logger.info("offline_consensus: exposing top-%d consensual projects", k)
+    return exposed
 
 
 def offline_controversiality(
@@ -435,7 +545,12 @@ def offline_controversiality(
     >>> offline_controversiality(inst, lv, k=1) == {p2}
     True
     """
-    return set()  # Empty implementation
+    # The k *least* consensual projects are the last k of gamma,
+    # {gamma_{m-k+1}, ..., gamma_m}. Slicing from m-k keeps k=0 correct.
+    gamma = most_consensual_projects(instance, lv_profile)
+    exposed = set(gamma[len(gamma) - k:])
+    logger.info("offline_controversiality: exposing bottom-%d consensual projects", k)
+    return exposed
 
 
 # ---------------------------------------------------------------------------
@@ -486,7 +601,25 @@ def online_adaptive_controversial(
     >>> online_adaptive_controversial(inst, lv, {p1, p2}, k=2) == {p1, p2}
     True
     """
-    return set()  # Empty implementation
+    # The consensus of a project is a property of the electorate that has voted
+    # on it. A Target Voter has only answered the projects already asked, so her
+    # revealed answers never affect the consensus of the *remaining* projects -
+    # which is why, for a single voter, recomputing each round is equivalent to
+    # ranking once by the LV consensus. We still run the k rounds explicitly and
+    # simulate each answer, matching Algorithm 5's structure.
+    consensus = consensus_levels(instance, lv_profile)
+    exposed: set[Project] = set()
+    for round_index in range(1, k + 1):
+        remaining = [project for project in instance if project not in exposed]
+        # Most controversial = lowest consensus, ties broken by project name.
+        project = min(remaining, key=lambda p: (consensus[p], str(p)))
+        answered_yes = project in full_ballot  # simulate the voter's answer
+        logger.info(
+            "online_adaptive_controversial: round %d asks %s -> voter %s",
+            round_index, project, "approves" if answered_yes else "disapproves",
+        )
+        exposed.add(project)
+    return exposed
 
 
 # ---------------------------------------------------------------------------
@@ -531,7 +664,19 @@ def predict_by_majority(
     >>> predict_by_majority(inst, lv, partial) == {p1, p2}
     True
     """
-    return ApprovalBallot()  # Empty implementation
+    n = lv_profile.num_ballots()
+    scores = approval_scores(instance, lv_profile)
+    result = set(approved_projects(ballot))  # keep the exposed approvals A_v
+    for project in hidden_projects(ballot, instance):
+        # LV approval rate >= 50% <=> score >= n/2 <=> 2*score >= n.
+        if 2 * scores[project] >= n:
+            result.add(project)
+            logger.debug(
+                "predict_by_majority: predict %s approved (LV %d/%d)",
+                project, scores[project], n,
+            )
+    logger.info("predict_by_majority: completed ballot to %d approvals", len(result))
+    return ApprovalBallot(result)
 
 
 def predict_by_classification(
@@ -576,7 +721,45 @@ def predict_by_classification(
     >>> predict_by_classification(inst, lv, partial) == {p1, p2}
     True
     """
-    return ApprovalBallot()  # Empty implementation
+    model = train_classification(instance, lv_profile, exposed_projects(ballot))
+    features = model["features"]
+    # The TV voter's feature vector: her vote on each exposed project.
+    approved = approved_projects(ballot)
+    tv_features = [1 if feature in approved else 0 for feature in features]
+    result = set(approved)  # keep the exposed approvals A_v
+    for project in hidden_projects(ballot, instance):
+        kind, payload = model["per_project"][project]
+        if kind == "const":
+            approve = payload
+        else:
+            import numpy as np
+            approve = int(payload.predict(np.array([tv_features]))[0])
+        if approve == 1:
+            result.add(project)
+    logger.info("predict_by_classification: completed ballot to %d approvals", len(result))
+    return ApprovalBallot(result)
+
+
+def _approve_hidden_by_score(
+    instance: Instance, ballot: CardinalBallot, scores: dict[Project, float]
+) -> set[Project]:
+    """
+    Complete a partial ballot from per-project scores: keep the exposed approvals
+    A_v and add each hidden project whose predicted score is >= 0.5 (the exposed
+    disapprovals D_v stay rejected). Shared by the matrix-factorization and
+    factorization-machines predictors.
+
+    >>> p1, p2, p3 = Project("p1", 1), Project("p2", 1), Project("p3", 1)
+    >>> inst = Instance([p1, p2, p3], budget_limit=3)
+    >>> b = partial_ballot(approved={p1}, hidden={p2, p3})
+    >>> _approve_hidden_by_score(inst, b, {p1: 1.0, p2: 0.8, p3: 0.2}) == {p1, p2}
+    True
+    """
+    result = set(approved_projects(ballot))
+    for project in hidden_projects(ballot, instance):
+        if scores[project] >= 0.5:
+            result.add(project)
+    return result
 
 
 def predict_by_matrix_factorization(
@@ -622,7 +805,12 @@ def predict_by_matrix_factorization(
     >>> predict_by_matrix_factorization(inst, lv, partial) == {p1, p2}
     True
     """
-    return ApprovalBallot()  # Empty implementation
+    scores = train_matrix_factorization(
+        instance, lv_profile, approved_projects(ballot), disapproved_projects(ballot)
+    )
+    result = _approve_hidden_by_score(instance, ballot, scores)
+    logger.info("predict_by_matrix_factorization: completed to %d approvals", len(result))
+    return ApprovalBallot(result)
 
 
 def predict_by_factorization_machines(
@@ -667,7 +855,12 @@ def predict_by_factorization_machines(
     >>> predict_by_factorization_machines(inst, lv, partial) == {p1, p2}
     True
     """
-    return ApprovalBallot()  # Empty implementation
+    scores = train_factorization_machines(
+        instance, lv_profile, approved_projects(ballot), disapproved_projects(ballot)
+    )
+    result = _approve_hidden_by_score(instance, ballot, scores)
+    logger.info("predict_by_factorization_machines: completed to %d approvals", len(result))
+    return ApprovalBallot(result)
 
 
 # ---------------------------------------------------------------------------
@@ -714,7 +907,24 @@ def recommend(
     >>> sorted(recommend(inst, lv, {"v4": {p1, p2}}, k=1), key=str)
     [p1, p2]
     """
-    return BudgetAllocation()  # Empty implementation
+    # Sampling: the offline-popularity sampler exposes the same k projects to
+    # every Target Voter.
+    exposed = offline_popularity(instance, lv_profile, k)
+    # Prediction: complete each TV ballot; start the combined profile from the LV
+    # ballots (which are already full).
+    completed_ballots = list(lv_profile)
+    for voter_id, full_ballot in tv_ballots.items():
+        partial = reveal_ballot(instance, full_ballot, exposed)
+        completed = predict_by_majority(instance, lv_profile, partial)
+        logger.debug("recommend: TV %s completed to %d approvals", voter_id, len(completed))
+        completed_ballots.append(completed)
+    # Voting rule: greedy approval on the LV + completed TV ballots.
+    combined = ApprovalProfile(completed_ballots)
+    logger.info(
+        "recommend: predicting bundle from %d LV + %d TV ballots",
+        lv_profile.num_ballots(), len(tv_ballots),
+    )
+    return greedy_approval(instance, combined)
 
 
 # ---------------------------------------------------------------------------
@@ -753,7 +963,14 @@ def fractional_allocation_score(
     >>> fractional_allocation_score({p3}, {p1}, budget_limit=6)
     0.0
     """
-    return 0.0  # Empty implementation
+    # lambda = total cost of the correctly-predicted projects (pb ∩ rb).
+    correctly_predicted = real_bundle & predicted_bundle
+    score = total_cost(correctly_predicted) / budget_limit
+    logger.info(
+        "fractional_allocation_score: %d/%d projects correct, FA=%.3f",
+        len(correctly_predicted), len(real_bundle | predicted_bundle), score,
+    )
+    return float(score)
 
 
 if __name__ == "__main__":
