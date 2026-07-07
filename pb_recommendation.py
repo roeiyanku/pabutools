@@ -13,6 +13,8 @@ import logging
 import random
 from collections.abc import Iterable
 
+import numpy as np
+
 from pabutools.election import (
     Instance,
     Project,
@@ -88,14 +90,11 @@ def partial_ballot(
     >>> exposed_projects(b) == {p1, p2}
     True
     """
-    scores: dict[Project, int] = {}
-    for project in approved:
-        scores[project] = APPROVAL
-    for project in disapproved:
-        scores[project] = DISAPPROVAL
-    for project in hidden:
-        scores[project] = HIDDEN
-    return CardinalBallot(scores)
+    return CardinalBallot(
+        {p: APPROVAL for p in approved}
+        | {p: DISAPPROVAL for p in disapproved}
+        | {p: HIDDEN for p in hidden}
+    )
 
 
 def reveal_ballot(
@@ -137,14 +136,11 @@ def reveal_ballot(
     >>> hidden_projects(b, inst) == {p2, p4}
     True
     """
-    approved = exposed & full_ballot          # A_v = E_v ∩ full ballot
-    disapproved = exposed - full_ballot        # D_v = E_v \ full ballot
-    hidden = set(instance) - exposed           # H_v = P \ E_v
-    logger.debug(
-        "reveal_ballot: |E_v|=%d -> |A_v|=%d, |D_v|=%d, |H_v|=%d",
-        len(exposed), len(approved), len(disapproved), len(hidden),
+    return partial_ballot(
+        approved=exposed & full_ballot,       # A_v = E_v ∩ full ballot
+        disapproved=exposed - full_ballot,    # D_v = E_v \ full ballot
+        hidden=set(instance) - exposed,       # H_v = P \ E_v
     )
-    return partial_ballot(approved=approved, disapproved=disapproved, hidden=hidden)
 
 
 def approved_projects(ballot: CardinalBallot) -> set[Project]:
@@ -549,13 +545,12 @@ def online_adaptive_controversial(
     consensus = consensus_levels(instance, lv_profile)
     exposed: set[Project] = set()
     for round_index in range(1, k + 1):
-        remaining = [project for project in instance if project not in exposed]
-        # Most controversial = lowest consensus, ties broken by project name.
-        project = min(remaining, key=lambda p: (consensus[p], str(p)))
-        answered_yes = project in full_ballot  # simulate the voter's answer
+        # Most controversial not-yet-asked project: lowest consensus, ties by name.
+        project = min(set(instance) - exposed, key=lambda p: (consensus[p], str(p)))
         logger.info(
             "online_adaptive_controversial: round %d asks %s -> voter %s",
-            round_index, project, "approves" if answered_yes else "disapproves",
+            round_index, project,
+            "approves" if project in full_ballot else "disapproves",
         )
         exposed.add(project)
     return exposed
@@ -605,15 +600,10 @@ def predict_by_majority(
     """
     n = lv_profile.num_ballots()
     scores = lv_profile.approval_scores()  # Definition 2.1, from the library
-    result = set(approved_projects(ballot))  # keep the exposed approvals A_v
-    for project in hidden_projects(ballot, instance):
-        # LV approval rate >= 50% <=> score >= n/2 <=> 2*score >= n.
-        if 2 * scores.get(project, 0) >= n:
-            result.add(project)
-            logger.debug(
-                "predict_by_majority: predict %s approved (LV %d/%d)",
-                project, scores.get(project, 0), n,
-            )
+    # predicted ballot = A_v  u  {p in H_v : LV approval rate of p >= 1/2}
+    result = approved_projects(ballot) | {
+        p for p in hidden_projects(ballot, instance) if 2 * scores.get(p, 0) >= n
+    }
     logger.info("predict_by_majority: completed ballot to %d approvals", len(result))
     return ApprovalBallot(result)
 
@@ -661,20 +651,17 @@ def predict_by_classification(
     True
     """
     model = train_classification(instance, lv_profile, exposed_projects(ballot))
-    features = model["features"]
-    # The TV voter's feature vector: her vote on each exposed project.
     approved = approved_projects(ballot)
-    tv_features = [1 if feature in approved else 0 for feature in features]
-    result = set(approved)  # keep the exposed approvals A_v
-    for project in hidden_projects(ballot, instance):
-        kind, payload = model["per_project"][project]
-        if kind == "const":
-            approve = payload
-        else:
-            import numpy as np
-            approve = int(payload.predict(np.array([tv_features]))[0])
-        if approve == 1:
-            result.add(project)
+    # The TV voter's feature row x: her vote (1/0) on each exposed feature project.
+    x = np.array([[1 if f in approved else 0 for f in model["features"]]])
+    hidden = hidden_projects(ballot, instance)
+    votes = {
+        p: (payload if kind == "const" else int(payload.predict(x)[0]))
+        for p, (kind, payload) in model["per_project"].items()
+        if p in hidden
+    }
+    # predicted ballot = A_v  u  {p in H_v : classifier of p predicts approval}
+    result = approved | {p for p in hidden if votes[p] == 1}
     logger.info("predict_by_classification: completed ballot to %d approvals", len(result))
     return ApprovalBallot(result)
 
@@ -694,11 +681,10 @@ def _approve_hidden_by_score(
     >>> _approve_hidden_by_score(inst, b, {p1: 1.0, p2: 0.8, p3: 0.2}) == {p1, p2}
     True
     """
-    result = set(approved_projects(ballot))
-    for project in hidden_projects(ballot, instance):
-        if scores[project] >= 0.5:
-            result.add(project)
-    return result
+    # predicted ballot = A_v  u  {p in H_v : score(p) >= 1/2}
+    return approved_projects(ballot) | {
+        p for p in hidden_projects(ballot, instance) if scores[p] >= 0.5
+    }
 
 
 def predict_by_matrix_factorization(
@@ -848,21 +834,22 @@ def recommend(
     """
     # Sampling: the offline-popularity sampler exposes the same k projects to
     # every Target Voter.
+    # Sampling -> prediction: complete every TV ballot from its k exposed answers.
     exposed = offline_popularity(instance, lv_profile, k)
-    # Prediction: complete each TV ballot; start the combined profile from the LV
-    # ballots (which are already full).
-    completed_ballots = list(lv_profile)
-    for voter_id, full_ballot in tv_ballots.items():
-        partial = reveal_ballot(instance, full_ballot, exposed)
-        completed = predict_by_majority(instance, lv_profile, partial)
-        logger.debug("recommend: TV %s completed to %d approvals", voter_id, len(completed))
-        completed_ballots.append(completed)
-    # Voting rule: greedy approval on the LV + completed TV ballots.
-    combined = ApprovalProfile(completed_ballots)
+    combined = ApprovalProfile(
+        list(lv_profile)
+        + [
+            predict_by_majority(
+                instance, lv_profile, reveal_ballot(instance, full_ballot, exposed)
+            )
+            for full_ballot in tv_ballots.values()
+        ]
+    )
     logger.info(
         "recommend: predicting bundle from %d LV + %d TV ballots",
         lv_profile.num_ballots(), len(tv_ballots),
     )
+    # Voting rule: greedy approval on the LV + completed TV ballots.
     return greedy_approval(instance, combined)
 
 
