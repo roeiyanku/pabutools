@@ -21,7 +21,8 @@ from pabutools.election import (
     CardinalBallot,
     total_cost,
 )
-from pabutools.rules import BudgetAllocation
+from pabutools.election.satisfaction import Cost_Sat
+from pabutools.rules import BudgetAllocation, greedy_utilitarian_welfare
 
 # Model training lives in a separate module, ``pb_model_training`` (the
 # professor's note b: separate files for training the model and using it). The
@@ -180,53 +181,9 @@ def as_approval_ballot(ballot: CardinalBallot) -> ApprovalBallot:
 # ---------------------------------------------------------------------------
 # Section 2.2.3 - Popularity and consensus (primitives used by every module).
 # ---------------------------------------------------------------------------
-def approval_scores(
-    instance: Instance, profile: ApprovalProfile
-) -> dict[Project, int]:
-    """
-    Definition 2.1 (Approval scores): the approval score of a project is the
-    number of voters that approve it.
-
-    This is exactly pabutools'
-    :py:meth:`~pabutools.election.profile.approvalprofile.AbstractApprovalProfile.approval_scores`,
-    so we delegate to the library instead of re-counting the ballots ourselves.
-    The only addition is that projects approved by nobody (absent from the
-    library's dictionary) are filled in with a score of 0, so every project of
-    the instance is present in the result.
-
-    Parameters
-    ----------
-        instance : :py:class:`~pabutools.election.instance.Instance`
-            The PB instance (the set of projects and the budget limit).
-        profile : :py:class:`~pabutools.election.profile.approvalprofile.ApprovalProfile`
-            The approval profile, i.e. the ballots of the voters.
-
-    Returns
-    -------
-        dict[:py:class:`~pabutools.election.instance.Project`, int]
-            A mapping from each project to its approval score.
-
-    Examples
-    --------
-    Example 1 from the paper (P = {p1, p2, p3}, three full ballots):
-
-    >>> p1, p2, p3 = Project("p1", 1), Project("p2", 1), Project("p3", 2)
-    >>> inst = Instance([p1, p2, p3], budget_limit=3)
-    >>> prof = ApprovalProfile([ApprovalBallot([p1, p2]),
-    ...                         ApprovalBallot([p1, p3]),
-    ...                         ApprovalBallot([p2])])
-    >>> s = approval_scores(inst, prof)
-    >>> [s[p] for p in (p1, p2, p3)]
-    [2, 2, 1]
-    """
-    # Reuse the library's counting (Definition 2.1), then fill 0 for the
-    # projects that nobody approved so the whole universe P is represented.
-    library_scores = profile.approval_scores()
-    scores = {project: library_scores.get(project, 0) for project in instance}
-    logger.debug("approval_scores: %s", scores)
-    return scores
-
-
+# Definition 2.1 (Approval scores) needs no function of our own: it is exactly
+# pabutools' ``profile.approval_scores()``. Callers below use the library method
+# directly (``.get(p, 0)`` supplies the 0 for projects that nobody approved).
 def consensus_levels(
     instance: Instance, profile: ApprovalProfile
 ) -> dict[Project, int]:
@@ -262,33 +219,15 @@ def consensus_levels(
     """
     # consensus(p) = |approvers(p) - disapprovers(p)|. With n voters and
     # score(p) approvers, disapprovers = n - score(p), so the difference is
-    # |score - (n - score)| = |2*score - n|.
+    # |score - (n - score)| = |2*score - n|. Scores come from the library
+    # (Definition 2.1 = pabutools' approval_scores()).
     n = profile.num_ballots()
-    scores = approval_scores(instance, profile)
-    consensus = {project: abs(2 * scores[project] - n) for project in instance}
+    scores = profile.approval_scores()
+    consensus = {
+        project: abs(2 * scores.get(project, 0) - n) for project in instance
+    }
     logger.debug("consensus_levels (n=%d): %s", n, consensus)
     return consensus
-
-
-def most_popular_projects(
-    instance: Instance, profile: ApprovalProfile
-) -> list[Project]:
-    """
-    The paper's ordering sigma (Section 2.2.3): the projects sorted by decreasing
-    approval score, ties broken lexicographically by project name. sigma_1 is the
-    most popular project, sigma_m the least. Helper used by the greedy rule and by
-    offline revealing-by-popularity.
-
-    Examples
-    --------
-    >>> p1, p2, p3 = Project("p1", 1), Project("p2", 1), Project("p3", 1)
-    >>> inst = Instance([p1, p2, p3], budget_limit=3)
-    >>> prof = ApprovalProfile([ApprovalBallot([p1, p3]), ApprovalBallot([p1])])
-    >>> most_popular_projects(inst, prof)  # scores p1=2, p3=1, p2=0
-    [p1, p3, p2]
-    """
-    scores = approval_scores(instance, profile)
-    return sorted(instance, key=lambda project: (-scores[project], str(project)))
 
 
 def most_consensual_projects(
@@ -326,10 +265,14 @@ def greedy_approval(
     are broken lexicographically by project name.
 
     .. note::
-        Implemented from scratch; it does *not* reuse pabutools'
-        :py:func:`~pabutools.rules.greedy_utilitarian_welfare`, which ranks by
-        satisfaction **divided by cost** (density). The paper ranks by the
-        **raw** approval score, so the two give different bundles.
+        Delegates to pabutools'
+        :py:func:`~pabutools.rules.greedy_utilitarian_welfare` with
+        :py:class:`~pabutools.election.satisfaction.additivesatisfaction.Cost_Sat`:
+        the rule ranks by marginal satisfaction divided by cost, and under
+        Cost_Sat a project's marginal satisfaction is score(p)*cost(p), so the
+        ranking is by the **raw** approval score - exactly the paper's greedy
+        approval. (With the default Cardinality_Sat the ranking would be
+        score/cost, which is a different rule.)
 
     Parameters
     ----------
@@ -356,20 +299,13 @@ def greedy_approval(
     >>> sorted(greedy_approval(inst, prof), key=str)
     [p1, p2]
     """
-    # Consider the projects by decreasing approval score (sigma) and fund each
-    # one whose cost still fits the remaining budget (Section 2.2.5).
-    chosen = BudgetAllocation()
-    spent = 0
-    for project in most_popular_projects(instance, profile):
-        if spent + project.cost <= instance.budget_limit:
-            chosen.append(project)
-            spent += project.cost
-            logger.debug("greedy_approval: fund %s (spent %s)", project, spent)
-        else:
-            logger.debug("greedy_approval: skip %s (would exceed budget)", project)
+    chosen = greedy_utilitarian_welfare(
+        instance, profile, sat_class=Cost_Sat, resoluteness=True
+    )
+    assert isinstance(chosen, BudgetAllocation)  # resolute mode: one allocation
     logger.info(
         "greedy_approval: funded %d/%d projects, cost %s of %s",
-        len(chosen), len(instance), spent, instance.budget_limit,
+        len(chosen), len(instance), total_cost(chosen), instance.budget_limit,
     )
     return chosen
 
@@ -464,7 +400,10 @@ def offline_popularity(
     >>> offline_popularity(inst, lv, k=1) == {p1}
     True
     """
-    exposed = set(most_popular_projects(instance, lv_profile)[:k])
+    # The paper's sigma ordering: decreasing library approval score, ties by name.
+    scores = lv_profile.approval_scores()
+    sigma = sorted(instance, key=lambda p: (-scores.get(p, 0), str(p)))
+    exposed = set(sigma[:k])
     logger.info("offline_popularity: exposing top-%d popular projects", k)
     return exposed
 
@@ -665,15 +604,15 @@ def predict_by_majority(
     True
     """
     n = lv_profile.num_ballots()
-    scores = approval_scores(instance, lv_profile)
+    scores = lv_profile.approval_scores()  # Definition 2.1, from the library
     result = set(approved_projects(ballot))  # keep the exposed approvals A_v
     for project in hidden_projects(ballot, instance):
         # LV approval rate >= 50% <=> score >= n/2 <=> 2*score >= n.
-        if 2 * scores[project] >= n:
+        if 2 * scores.get(project, 0) >= n:
             result.add(project)
             logger.debug(
                 "predict_by_majority: predict %s approved (LV %d/%d)",
-                project, scores[project], n,
+                project, scores.get(project, 0), n,
             )
     logger.info("predict_by_majority: completed ballot to %d approvals", len(result))
     return ApprovalBallot(result)

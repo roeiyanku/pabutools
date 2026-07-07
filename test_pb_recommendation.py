@@ -35,7 +35,6 @@ from pb_recommendation import (
     exposed_projects,
     hidden_projects,
     as_approval_ballot,
-    approval_scores,
     consensus_levels,
     greedy_approval,
     random_setup,
@@ -136,39 +135,9 @@ def reference_greedy_approval(projects, profile, budget):
 
 
 # ---------------------------------------------------------------------------
-# approval_scores
-# ---------------------------------------------------------------------------
-class TestApprovalScores:
-    def test_example1(self, example1):
-        p, inst, prof = example1
-        scores = approval_scores(inst, prof)
-        assert scores[p["p1"]] == 2
-        assert scores[p["p2"]] == 2
-        assert scores[p["p3"]] == 1
-
-    def test_empty_profile(self):
-        p = make_projects([("p1", 1), ("p2", 1)])
-        inst = Instance(p.values(), budget_limit=2)
-        scores = approval_scores(inst, ApprovalProfile([]))
-        assert all(scores[proj] == 0 for proj in p.values())
-
-    def test_large_structured_all_approve_all(self):
-        # "Complete-approval" analogue: 200 projects, 500 voters, everyone
-        # approves everything -> every score is exactly 500.
-        projects = padded_projects(200, cost=1)
-        inst = Instance(projects, budget_limit=10)
-        prof = ApprovalProfile([ApprovalBallot(projects)] * 500)
-        scores = approval_scores(inst, prof)
-        assert all(scores[p] == 500 for p in projects)
-
-    def test_matches_manual_count_random(self):
-        # Cross-check against an independent counting implementation.
-        projects, inst, prof = random_instance(40, 120, 100, seed=31)
-        assert approval_scores(inst, prof) == manual_scores(projects, prof)
-
-
-# ---------------------------------------------------------------------------
 # consensus_levels
+# (Approval scores, Definition 2.1, have no function of our own - the code uses
+# pabutools' profile.approval_scores() directly, which the library itself tests.)
 # ---------------------------------------------------------------------------
 class TestConsensusLevels:
     def test_example7(self, consensus_data):
