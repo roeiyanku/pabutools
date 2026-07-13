@@ -1214,52 +1214,5 @@ def fractional_allocation_score(
 
 if __name__ == "__main__":
     import doctest
-    import sys
 
-    print(doctest.testmod())
-
-    # ------------------------------------------------------------------
-    # Logging demo - a complex example. Run ``python pb_recommendation.py``
-    # to see the full log trail of one end-to-end pipeline run.
-    # ------------------------------------------------------------------
-    logging.basicConfig(
-        level=logging.DEBUG, format="%(levelname)s\t%(message)s",
-        stream=sys.stdout,  # keep the log lines in order with the prints
-    )
-
-    print("\n--- Complex example: two-camp electorate, partial ballots ---")
-    projects = [Project(f"p{i}", 1) for i in range(1, 7)]
-    camp_a, camp_b = set(projects[:3]), set(projects[3:])
-    demo_instance = Instance(projects, budget_limit=3)
-    # The ideal instance: 18 voters approve {p1,p2,p3}, 12 approve {p4,p5,p6}.
-    demo_profile = ApprovalProfile(
-        [ApprovalBallot(camp_a)] * 18 + [ApprovalBallot(camp_b)] * 12
-    )
-    real = set(greedy_approval(demo_instance, demo_profile))
-
-    # A third of the voters only answer k=2 questions; predict the rest.
-    demo_lv, demo_tv = split_lv_tv(
-        demo_profile, sample_degree=1.0, lv_degree=2 / 3, seed=1
-    )
-    predicted = set(
-        run_pipeline(
-            demo_instance, demo_lv, demo_tv, k=2,
-            setup="offline_popularity", predict=predict_by_matrix_factorization,
-        )
-    )
-    fa = fractional_allocation_score(real, predicted, demo_instance.budget_limit)
-    print(f"real bundle:      {sorted(real, key=str)}")
-    print(f"predicted bundle: {sorted(predicted, key=str)}  (FA={fa:.2f})")
-
-    # ------------------------------------------------------------------
-    # Validation failure demo - invalid inputs raise a clear ValueError.
-    # ------------------------------------------------------------------
-    print("\n--- Validation failure demo ---")
-    for setup_name, k in [("by_magic", 2), ("random", 99)]:
-        try:
-            run_pipeline(
-                demo_instance, demo_lv, demo_tv, k=k,
-                setup=setup_name, predict=predict_by_matrix_factorization,
-            )
-        except ValueError as error:
-            print(f"Caught ValueError: {error}")
+    doctest.testmod(verbose=True)
