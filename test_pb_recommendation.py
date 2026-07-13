@@ -405,6 +405,50 @@ class TestRunPipeline:
         assert sum(proj.cost for proj in bundle) <= inst.budget_limit
         assert len(bundle) > 0
 
+    @pytest.mark.parametrize("setup", [
+        "random",
+        "offline_popularity",
+        "offline_consensus",
+        "offline_controversiality",
+        "online_adaptive_controversial",
+    ])
+    @pytest.mark.parametrize("predictor", LIBRARY_PREDICTORS)
+    def test_two_camp_electorate_recovers_real_bundle(self, setup, predictor):
+        """
+        The end-to-end criterion of the paper (Section 2.4): the pipeline must
+        estimate the *ideal* outcome. A structured two-camp electorate - a 60%
+        majority camp approving {p1, p2, p3} and a 40% minority camp approving
+        {p4, p5, p6} - fixes the real winning bundle at {p1, p2, p3}. A third
+        of the voters become TV with only k=2 of the 6 projects exposed, and
+        every setup x predictor combination must still reconstruct the exact
+        real bundle (FA = 1.0, SD = 0).
+        """
+        p = make_projects([(f"p{i}", 1) for i in range(1, 7)])
+        camp_a = {p["p1"], p["p2"], p["p3"]}   # 18 of 30 voters (60%)
+        camp_b = {p["p4"], p["p5"], p["p6"]}   # 12 of 30 voters (40%)
+        inst = Instance(p.values(), budget_limit=3)
+
+        # The real bundle, from all 30 full ballots: camp A's projects score
+        # 18 > 12, and the budget funds exactly three unit-cost projects.
+        full_profile = ApprovalProfile(
+            [ApprovalBallot(camp_a)] * 18 + [ApprovalBallot(camp_b)] * 12
+        )
+        real_bundle = set(greedy_approval(inst, full_profile))
+        assert real_bundle == camp_a  # sanity: the ground truth is as designed
+
+        # LV/TV split preserving the 60/40 mix: 20 LV, 10 TV.
+        lv = ApprovalProfile([ApprovalBallot(camp_a)] * 12
+                             + [ApprovalBallot(camp_b)] * 8)
+        tv = {f"a{i}": set(camp_a) for i in range(6)}
+        tv.update({f"b{i}": set(camp_b) for i in range(4)})
+
+        predicted = set(run_pipeline(inst, lv, tv, k=2,
+                                     setup=setup, predict=predictor, seed=7))
+        assert predicted == real_bundle
+        assert fractional_allocation_score(
+            real_bundle, predicted, inst.budget_limit) == 1.0
+        assert len(real_bundle ^ predicted) == 0  # symmetric distance
+
 
 # ---------------------------------------------------------------------------
 # classification_metrics (Section 5.1)
