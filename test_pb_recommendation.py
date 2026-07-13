@@ -1,6 +1,7 @@
 """
 Unit tests for `pb_recommendation`, the implementation of the algorithms in
-"A Recommendation System for Participatory Budgeting" (Leibiker & Talmon, 2023).
+"A Recommendation System for Participatory Budgeting",
+by Gil Leibiker and Nimrod Talmon (2023), https://optlearnmas23.github.io/files/p17.pdf
 
 Run with:  pytest test_pb_recommendation.py -v
 
@@ -42,11 +43,11 @@ from pb_recommendation import (
     offline_consensus,
     offline_controversiality,
     online_adaptive_controversial,
-    predict_by_majority,
     predict_by_classification,
     predict_by_matrix_factorization,
     predict_by_factorization_machines,
-    recommend,
+    run_pipeline,
+    classification_metrics,
     fractional_allocation_score,
 )
 
@@ -340,46 +341,9 @@ class TestPartialBallot:
 
 
 # ---------------------------------------------------------------------------
-# predict_by_majority
-# ---------------------------------------------------------------------------
-class TestPredictByMajority:
-    def test_example11(self):
-        p = make_projects([("p1", 4), ("p2", 4), ("p3", 6)])
-        inst = Instance(p.values(), budget_limit=6)
-        lv = ApprovalProfile(
-            [ApprovalBallot([p["p1"], p["p2"]]), ApprovalBallot([p["p1"], p["p2"]])]
-        )
-        partial = partial_ballot(hidden=set(p.values()))
-        pred = predict_by_majority(inst, lv, partial)
-        assert set(pred) == {p["p1"], p["p2"]}
-
-    def test_exposed_approvals_are_kept(self):
-        p = make_projects([("p1", 1), ("p2", 1), ("p3", 1)])
-        inst = Instance(p.values(), budget_limit=3)
-        # LV would reject p3 (0%), but the voter explicitly approved it.
-        lv = ApprovalProfile([ApprovalBallot([p["p1"]]), ApprovalBallot([p["p1"]])])
-        partial = partial_ballot(
-            approved={p["p3"]}, hidden={p["p1"], p["p2"]}
-        )
-        pred = predict_by_majority(inst, lv, partial)
-        assert p["p3"] in pred
-
-    def test_exposed_disapprovals_stay_rejected(self):
-        p = make_projects([("p1", 1), ("p2", 1)])
-        inst = Instance(p.values(), budget_limit=2)
-        # LV approves both p1 and p2 unanimously, but the voter explicitly
-        # disapproved p1; p2 is hidden and should be predicted as approved.
-        lv = ApprovalProfile([ApprovalBallot([p["p1"], p["p2"]])] * 3)
-        partial = partial_ballot(disapproved={p["p1"]}, hidden={p["p2"]})
-        pred = predict_by_majority(inst, lv, partial)
-        assert p["p1"] not in pred  # the explicit disapproval is honoured
-        assert p["p2"] in pred      # hidden + LV majority -> approved
-
-
-# ---------------------------------------------------------------------------
-# Library-backed predictors: classification (XGBoost), MF, FM (Section 2.1).
-# They share the contract of predict_by_majority, so the same behavioural
-# invariants are checked for each one.
+# The three prediction modules of the paper: classification (XGBoost), MF, FM
+# (Section 2.1). They share one contract - keep the exposed votes, predict the
+# hidden ones - so the same behavioural invariants are checked for each.
 # ---------------------------------------------------------------------------
 LIBRARY_PREDICTORS = [
     predict_by_classification,
@@ -416,14 +380,16 @@ class TestLibraryPredictors:
 
 
 # ---------------------------------------------------------------------------
-# recommend (full pipeline)
+# run_pipeline (full pipeline)
 # ---------------------------------------------------------------------------
-class TestRecommend:
+class TestRunPipeline:
     def test_example10_perfect(self):
         p = make_projects([("p1", 3), ("p2", 3), ("p3", 4), ("p4", 4)])
         inst = Instance(p.values(), budget_limit=6)
         lv = ApprovalProfile([ApprovalBallot([p["p1"], p["p2"]])] * 3)
-        bundle = set(recommend(inst, lv, {"v4": {p["p1"], p["p2"]}}, k=1))
+        bundle = set(run_pipeline(inst, lv, {"v4": {p["p1"], p["p2"]}}, k=1,
+                                  setup="offline_popularity",
+                                  predict=predict_by_matrix_factorization))
         assert bundle == {p["p1"], p["p2"]}
 
     def test_pipeline_respects_budget_random(self):
@@ -432,10 +398,48 @@ class TestRecommend:
         inst = Instance(p.values(), budget_limit=6)
         lv = ApprovalProfile([ApprovalBallot([p["p1"], p["p2"]])] * 4)
         tv = {"v1": {p["p1"], p["p2"]}, "v2": {p["p1"]}}
-        bundle = list(recommend(inst, lv, tv, k=2))
+        bundle = list(run_pipeline(inst, lv, tv, k=2,
+                                   setup="offline_popularity",
+                                   predict=predict_by_matrix_factorization))
         assert set(bundle) <= set(p.values())
         assert sum(proj.cost for proj in bundle) <= inst.budget_limit
         assert len(bundle) > 0
+
+
+# ---------------------------------------------------------------------------
+# classification_metrics (Section 5.1)
+# ---------------------------------------------------------------------------
+class TestClassificationMetrics:
+    def test_mixed_hit_miss_false_alarm(self):
+        p = make_projects([("p1", 1), ("p2", 1), ("p3", 1), ("p4", 1)])
+        hidden = set(p.values())
+        # really approves {p1, p2}, predicted {p1, p3}: hit p1, miss p2, false p3.
+        m = classification_metrics({p["p1"], p["p2"]}, {p["p1"], p["p3"]}, hidden)
+        assert m == {"precision": 0.5, "recall": 0.5, "f1": 0.5}
+
+    def test_perfect_prediction(self):
+        p = make_projects([("p1", 1), ("p2", 1), ("p3", 1)])
+        hidden = set(p.values())
+        m = classification_metrics({p["p1"], p["p2"]}, {p["p1"], p["p2"]}, hidden)
+        assert m == {"precision": 1.0, "recall": 1.0, "f1": 1.0}
+
+    def test_exposed_votes_excluded(self):
+        # A wrong prediction on an *exposed* project must not affect the metrics:
+        # only the hidden set is scored. Hidden = {p2}, predicted perfectly there.
+        p = make_projects([("p1", 1), ("p2", 1)])
+        m = classification_metrics(
+            real_approved={p["p2"]},          # p1 exposed, p2 hidden+approved
+            predicted_approved={p["p1"], p["p2"]},
+            hidden={p["p2"]},
+        )
+        assert m == {"precision": 1.0, "recall": 1.0, "f1": 1.0}
+
+    def test_no_approvals_gives_zero(self):
+        # No real and no predicted approvals among the hidden projects -> the
+        # metrics are undefined and reported as 0.0 by convention.
+        p = make_projects([("p1", 1), ("p2", 1)])
+        m = classification_metrics(set(), set(), hidden=set(p.values()))
+        assert m == {"precision": 0.0, "recall": 0.0, "f1": 0.0}
 
 
 # ---------------------------------------------------------------------------

@@ -26,8 +26,7 @@ from pabutools.election import (
 from pabutools.election.satisfaction import Cost_Sat
 from pabutools.rules import BudgetAllocation, greedy_utilitarian_welfare
 
-# Model training lives in a separate module, ``pb_model_training`` (the
-# professor's note b: separate files for training the model and using it). The
+# Model training lives in a separate module, ``pb_model_training``. The
 # learning-based predictors below delegate the fitting to its ``train_*``
 # functions; ``pb_model_training`` is ballot-agnostic (it takes plain project
 # sets), so the dependency is one-directional and there is no import cycle.
@@ -37,8 +36,8 @@ from pb_model_training import (
     train_factorization_machines,
 )
 
-# Log the steps of every algorithm at INFO/DEBUG level (see the assignment's
-# logging requirement). Configure a handler in your own script to see them, e.g.
+# Log the steps of every algorithm at INFO/DEBUG level.
+#  Configure a handler in your own script to see them, e.g.
 # ``logging.basicConfig(level=logging.INFO)``.
 logger = logging.getLogger(__name__)
 
@@ -557,57 +556,8 @@ def online_adaptive_controversial(
 
 
 # ---------------------------------------------------------------------------
-# Section 2.1 / examples - Prediction module (majority rule over LV).
+# Section 2.1.1 - Binary classification (predicted with a trained model).
 # ---------------------------------------------------------------------------
-def predict_by_majority(
-    instance: Instance,
-    lv_profile: ApprovalProfile,
-    ballot: CardinalBallot,
-) -> ApprovalBallot:
-    """
-    Prediction module (Section 2.1). Completes a single partial TV ballot into a
-    full approval ballot: every project in the hidden set H_v is predicted as
-    approved iff its approval rate among the LV voters is at least 50%. The
-    exposed approvals A_v are kept; the exposed disapprovals D_v stay rejected.
-
-    Parameters
-    ----------
-        instance : :py:class:`~pabutools.election.instance.Instance`
-            The PB instance.
-        lv_profile : :py:class:`~pabutools.election.profile.approvalprofile.ApprovalProfile`
-            The full ballots of the LV voters, used as the training data.
-        ballot : :py:class:`~pabutools.election.ballot.cardinalballot.CardinalBallot`
-            The Target Voter's partial ballot to complete (the +1/-1/0 partial
-            ballot built by ``partial_ballot`` / ``reveal_ballot``).
-
-    Returns
-    -------
-        :py:class:`~pabutools.election.ballot.approvalballot.ApprovalBallot`
-            The full predicted approval ballot of the TV voter.
-
-    Examples
-    --------
-    Example 11 from the paper: 2 LV voters both approve {p1, p2}. A TV voter with
-    nothing exposed (all three projects hidden) is predicted to approve p1 (100%)
-    and p2 (100%) but not p3 (0%).
-
-    >>> p1, p2, p3 = Project("p1", 4), Project("p2", 4), Project("p3", 6)
-    >>> inst = Instance([p1, p2, p3], budget_limit=6)
-    >>> lv = ApprovalProfile([ApprovalBallot([p1, p2]), ApprovalBallot([p1, p2])])
-    >>> partial = partial_ballot(hidden={p1, p2, p3})
-    >>> predict_by_majority(inst, lv, partial) == {p1, p2}
-    True
-    """
-    n = lv_profile.num_ballots()
-    scores = lv_profile.approval_scores()  # Definition 2.1, from the library
-    # predicted ballot = A_v  u  {p in H_v : LV approval rate of p >= 1/2}
-    result = approved_projects(ballot) | {
-        p for p in hidden_projects(ballot, instance) if 2 * scores.get(p, 0) >= n
-    }
-    logger.info("predict_by_majority: completed ballot to %d approvals", len(result))
-    return ApprovalBallot(result)
-
-
 def predict_by_classification(
     instance: Instance,
     lv_profile: ApprovalProfile,
@@ -791,16 +741,152 @@ def predict_by_factorization_machines(
 # ---------------------------------------------------------------------------
 # Full pipeline (sampling -> prediction -> greedy approval).
 # ---------------------------------------------------------------------------
-def recommend(
+# The paper's design space is a matrix: one setup (Section 3.1) times one
+# predictor (Section 2.1). These registries name every choice so a caller can
+# pick a cell (``run_pipeline``) or sweep the whole matrix (``run_all_experiments``).
+SETUPS = (
+    "random",
+    "offline_popularity",
+    "offline_consensus",
+    "offline_controversiality",
+    "online_adaptive_controversial",
+)
+
+PREDICTORS = {
+    "classification": predict_by_classification,
+    "matrix_factorization": predict_by_matrix_factorization,
+    "factorization_machines": predict_by_factorization_machines,
+}
+
+
+def exposed_sets(
+    instance: Instance,
+    lv_profile: ApprovalProfile,
+    tv_ballots: dict[str, set[Project]],
+    setup: str,
+    k: int,
+    seed: int | None = None,
+) -> dict[str, set[Project]]:
+    """
+    The exposed set E_v of every Target Voter under one of the five Section 3.1
+    setups, keyed by voter id. Helper that hides the setups' differing
+    signatures behind one interface: the three offline samplers expose the
+    *same* k projects to everyone, while ``random`` and
+    ``online_adaptive_controversial`` are computed per voter (the latter needs
+    each voter's full ballot to answer its adaptive questions).
+
+    Examples
+    --------
+    Offline popularity exposes the single most popular LV project (p1) to every
+    Target Voter.
+
+    >>> p1, p2, p3 = Project("p1", 1), Project("p2", 1), Project("p3", 1)
+    >>> inst = Instance([p1, p2, p3], budget_limit=3)
+    >>> lv = ApprovalProfile([ApprovalBallot([p1, p2]), ApprovalBallot([p1])])
+    >>> exposed_sets(inst, lv, {"v3": {p1}}, "offline_popularity", k=1)
+    {'v3': {p1}}
+    """
+    if setup == "random":
+        return {vid: random_setup(instance, k, seed) for vid in tv_ballots}
+    if setup == "online_adaptive_controversial":
+        return {
+            vid: online_adaptive_controversial(instance, lv_profile, full_ballot, k)
+            for vid, full_ballot in tv_ballots.items()
+        }
+    offline = {
+        "offline_popularity": offline_popularity,
+        "offline_consensus": offline_consensus,
+        "offline_controversiality": offline_controversiality,
+    }[setup]
+    shared = offline(instance, lv_profile, k)  # same set for every TV voter
+    return {vid: shared for vid in tv_ballots}
+
+
+def split_lv_tv(
+    profile: ApprovalProfile,
+    sample_degree: float,
+    lv_degree: float,
+    seed: int | None = None,
+) -> tuple[ApprovalProfile, dict[str, set[Project]]]:
+    """
+    Step 1 of the pipeline (Section 2.4 / 3.0.1): partition the voters of the
+    *ideal* instance into Learning Voters (LV, who keep their full ballots) and
+    Target Voters (TV, whose ballots start hidden and are later completed).
+
+    The partition follows the paper's two knobs (Example 3.1), read here at the
+    voter level:
+
+    * ``sample_degree`` - the fraction of voters that are *sampled* (participate).
+      The rest are dropped from the partial instance I1.
+    * ``lv_degree`` - among the sampled voters, the fraction that are LV; the rest
+      are TV. ``lv_degree == 1`` is the paper's naive "sampling" baseline (every
+      sampled voter gives a full ballot, no prediction needed).
+
+    Parameters
+    ----------
+        profile : :py:class:`~pabutools.election.profile.approvalprofile.ApprovalProfile`
+            The ideal instance's full ballots (all n voters).
+        sample_degree : float
+            Fraction of voters sampled, in [0, 1].
+        lv_degree : float
+            Fraction of the sampled voters that are LV, in [0, 1].
+        seed : int, optional
+            Seed for the random partition, for reproducibility.
+
+    Returns
+    -------
+        tuple[:py:class:`~pabutools.election.profile.approvalprofile.ApprovalProfile`, dict[str, set[:py:class:`~pabutools.election.instance.Project`]]]
+            The LV profile (full ballots) and the TV voters' full ballots keyed by
+            voter id (their known ground truth, used to simulate the k answers).
+
+    Examples
+    --------
+    Four voters. Sampling everyone with ``lv_degree == 1`` makes everyone an LV
+    and leaves no TV; a half sample split evenly gives one LV and one TV.
+
+    >>> p1, p2 = Project("p1", 1), Project("p2", 1)
+    >>> prof = ApprovalProfile([ApprovalBallot([p1]), ApprovalBallot([p2]),
+    ...                         ApprovalBallot([p1, p2]), ApprovalBallot([])])
+    >>> lv, tv = split_lv_tv(prof, sample_degree=1.0, lv_degree=1.0)
+    >>> lv.num_ballots(), len(tv)
+    (4, 0)
+    >>> lv, tv = split_lv_tv(prof, sample_degree=0.5, lv_degree=0.5, seed=0)
+    >>> lv.num_ballots(), len(tv)
+    (1, 1)
+    """
+    voters = list(profile)
+    order = list(range(len(voters)))
+    random.Random(seed).shuffle(order)
+    n_sample = round(sample_degree * len(voters))
+    sampled = order[:n_sample]
+    n_lv = round(lv_degree * n_sample)
+    lv_profile = ApprovalProfile([voters[i] for i in sampled[:n_lv]])
+    tv_ballots = {f"v{i}": set(voters[i]) for i in sampled[n_lv:]}
+    logger.info(
+        "split_lv_tv: sample=%.2f lv=%.2f -> %d LV, %d TV (of %d voters)",
+        sample_degree, lv_degree, lv_profile.num_ballots(), len(tv_ballots),
+        len(voters),
+    )
+    return lv_profile, tv_ballots
+
+
+def run_pipeline(
     instance: Instance,
     lv_profile: ApprovalProfile,
     tv_ballots: dict[str, set[Project]],
     k: int,
+    *,
+    setup: str,
+    predict,
+    seed: int | None = None,
 ) -> BudgetAllocation:
     """
-    The complete Section 3 pipeline with the offline-popularity sampler: expose
-    the k most popular LV projects to each TV voter, predict the hidden votes by
-    LV majority, then run greedy approval on the LV plus completed TV ballots.
+    The complete Section 3 pipeline for one (setup, predictor) choice: expose k
+    projects to each TV voter with ``setup``, complete the hidden votes with the
+    ``predict`` module, then run greedy approval on the LV plus completed TV
+    ballots. ``setup`` and ``predict`` are required - the pipeline runs exactly
+    one cell of the design matrix, so the caller must name both explicitly (the
+    sweep over every cell is :py:func:`run_all_experiments`).
 
     Parameters
     ----------
@@ -813,6 +899,13 @@ def recommend(
             the ideal instance - keyed by voter id.
         k : int
             The number of projects to expose per TV voter.
+        setup : str
+            The name of the Section 3.1 setup to use (one of :py:data:`SETUPS`).
+        predict : callable
+            The Section 2.1 prediction module (one of :py:data:`PREDICTORS`'
+            values).
+        seed : int, optional
+            Seed for the ``random`` setup, ignored by the others.
 
     Returns
     -------
@@ -829,35 +922,232 @@ def recommend(
     ...                   Project("p3", 4), Project("p4", 4))
     >>> inst = Instance([p1, p2, p3, p4], budget_limit=6)
     >>> lv = ApprovalProfile([ApprovalBallot([p1, p2])] * 3)
-    >>> sorted(recommend(inst, lv, {"v4": {p1, p2}}, k=1), key=str)
+    >>> sorted(run_pipeline(inst, lv, {"v4": {p1, p2}}, k=1,
+    ...                     setup="offline_popularity",
+    ...                     predict=predict_by_matrix_factorization), key=str)
     [p1, p2]
     """
-    # Sampling: the offline-popularity sampler exposes the same k projects to
-    # every Target Voter.
-    # Sampling -> prediction: complete every TV ballot from its k exposed answers.
-    exposed = offline_popularity(instance, lv_profile, k)
+    # Step 1 (the LV/TV split) is done by the caller / :py:func:`split_lv_tv`.
+    # Step 2 - sampling: pick the exposed set of every TV voter under the setup.
+    exposed = exposed_sets(instance, lv_profile, tv_ballots, setup, k, seed)
+    # Steps 3-4 - prediction + combine: complete every TV ballot from its k
+    # exposed answers and merge with the known LV ballots.
     combined = ApprovalProfile(
         list(lv_profile)
         + [
-            predict_by_majority(
-                instance, lv_profile, reveal_ballot(instance, full_ballot, exposed)
+            predict(
+                instance,
+                lv_profile,
+                reveal_ballot(instance, tv_ballots[vid], exposed[vid]),
             )
-            for full_ballot in tv_ballots.values()
+            for vid in tv_ballots
         ]
     )
     logger.info(
-        "recommend: predicting bundle from %d LV + %d TV ballots",
-        lv_profile.num_ballots(), len(tv_ballots),
+        "recommend: setup=%s predict=%s, %d LV + %d TV ballots",
+        setup, predict.__name__, lv_profile.num_ballots(), len(tv_ballots),
     )
-    # Voting rule: greedy approval on the LV + completed TV ballots.
+    # Steps 5-6 - voting rule: greedy approval on the LV + completed TV ballots.
     return greedy_approval(instance, combined)
+
+
+#: The partiality grid swept in the paper's experiments (Section 6).
+SAMPLE_DEGREES = (0.1, 0.15, 0.3, 0.5, 0.7, 0.9)
+LV_DEGREES = (0.1, 0.2, 0.3, 0.5, 0.7, 0.9, 1.0)
+
+
+def run_all_experiments(
+    instance: Instance,
+    profile: ApprovalProfile,
+    k: int,
+    *,
+    setups: Iterable[str] = SETUPS,
+    predictors: Iterable[str] = tuple(PREDICTORS),
+    sample_degrees: Iterable[float] = SAMPLE_DEGREES,
+    lv_degrees: Iterable[float] = LV_DEGREES,
+    n_repeat: int = 50,
+    seed: int | None = None,
+) -> dict[tuple[float, float, str, str], dict[str, float]]:
+    """
+    The paper's full treatment matrix (Section 6, Figure 4). For every cell -
+    setup x predictor x sample_degree x lv_degree - the ideal ``profile`` is
+    split into LV/TV with :py:func:`split_lv_tv`, the pipeline is run with
+    :py:func:`run_pipeline`, and the predicted bundle is compared to the *real*
+    bundle (greedy approval on the whole ideal profile). Because the split is
+    random, each cell is repeated ``n_repeat`` times and the two bundle metrics -
+    Fractional Allocation (:py:func:`fractional_allocation_score`) and the
+    Symmetric Distance ``|rb △ pb|`` (Section 5.2.1, computed inline) - are
+    averaged.
+
+    .. note::
+        The paper repeats the sampling module 20 times and the prediction module
+        50 times; ``n_repeat`` collapses both into one knob (default 50). The full
+        grid is ``len(setups) * len(predictors) * len(sample_degrees) *
+        len(lv_degrees)`` cells, so shrink the iterables or ``n_repeat`` for a
+        quick run. ``classification`` needs ``scikit-learn`` installed.
+
+    Parameters
+    ----------
+        instance : :py:class:`~pabutools.election.instance.Instance`
+            The PB instance.
+        profile : :py:class:`~pabutools.election.profile.approvalprofile.ApprovalProfile`
+            The ideal instance's full ballots (all voters).
+        k : int
+            The number of projects to expose per TV voter.
+        setups : Iterable[str], optional
+            The setups to sweep (names from :py:data:`SETUPS`).
+        predictors : Iterable[str], optional
+            The predictors to sweep (names from :py:data:`PREDICTORS`). Defaults to
+            all three paper predictors (classification / MF / FM).
+        sample_degrees, lv_degrees : Iterable[float], optional
+            The partiality grid (Section 3.0.1). Default to the paper's ranges.
+        n_repeat : int, optional
+            Random splits averaged per cell (default 50).
+        seed : int, optional
+            Seed for the whole sweep, for reproducibility.
+
+    Returns
+    -------
+        dict[tuple[float, float, str, str], dict[str, float]]
+            Keyed by ``(sample_degree, lv_degree, setup, predictor)``, each value
+            is ``{"FA": mean fractional allocation, "SD": mean symmetric distance}``.
+
+    Examples
+    --------
+    Example 10 from the paper - the "perfect" case, swept over a tiny grid with
+    the two ML-free recommendation predictors. Every cell yields an FA in [0, 1]
+    and a non-negative SD.
+
+    >>> p1, p2, p3, p4 = (Project("p1", 3), Project("p2", 3),
+    ...                   Project("p3", 4), Project("p4", 4))
+    >>> inst = Instance([p1, p2, p3, p4], budget_limit=6)
+    >>> prof = ApprovalProfile([ApprovalBallot([p1, p2])] * 4)
+    >>> results = run_all_experiments(
+    ...     inst, prof, k=1,
+    ...     predictors=("matrix_factorization", "factorization_machines"),
+    ...     sample_degrees=(0.5,), lv_degrees=(0.5,), n_repeat=2, seed=0)
+    >>> len(results) == 5 * 2  # 5 setups x 2 predictors x 1 x 1 cells
+    True
+    >>> all(0.0 <= c["FA"] <= 1.0 and c["SD"] >= 0 for c in results.values())
+    True
+    """
+    # The real bundle: greedy approval on the whole ideal profile (all voters).
+    real_bundle = set(greedy_approval(instance, profile))
+    rng = random.Random(seed)
+    results: dict[tuple[float, float, str, str], dict[str, float]] = {}
+    for sample_degree in sample_degrees:
+        for lv_degree in lv_degrees:
+            for setup in setups:
+                for name in predictors:
+                    predict = PREDICTORS[name]
+                    fa_sum = sd_sum = 0.0
+                    for _ in range(n_repeat):
+                        lv_profile, tv_ballots = split_lv_tv(
+                            profile, sample_degree, lv_degree,
+                            seed=rng.randrange(2**32),
+                        )
+                        predicted = set(
+                            run_pipeline(
+                                instance, lv_profile, tv_ballots, k,
+                                setup=setup, predict=predict,
+                                seed=rng.randrange(2**32),
+                            )
+                        )
+                        fa_sum += fractional_allocation_score(
+                            real_bundle, predicted, instance.budget_limit
+                        )
+                        # Symmetric Distance (Section 5.2.1): |rb △ pb|.
+                        sd_sum += len(real_bundle ^ predicted)
+                    cell = {"FA": fa_sum / n_repeat, "SD": sd_sum / n_repeat}
+                    results[(sample_degree, lv_degree, setup, name)] = cell
+                    logger.info(
+                        "run_all_experiments: sample=%.2f lv=%.2f setup=%s "
+                        "predict=%s -> FA=%.3f SD=%.2f",
+                        sample_degree, lv_degree, setup, name,
+                        cell["FA"], cell["SD"],
+                    )
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Section 5.1 - Classification accuracy metrics.
+# ---------------------------------------------------------------------------
+def classification_metrics(
+    real_approved: set[Project],
+    predicted_approved: set[Project],
+    hidden: set[Project],
+) -> dict[str, float]:
+    """
+    Section 5.1 (Classification Accuracy Metrics): precision, recall and F1 of a
+    prediction module, measured over one Target Voter's *hidden* projects (the
+    test set - the exposed votes are known, not predicted, so they are excluded).
+    Approval is the positive class, so from the confusion matrix over the hidden
+    projects:
+
+    * TP = hidden projects the voter really approves and we predicted approve,
+    * FP = hidden projects we predicted approve but she really rejects,
+    * FN = hidden projects she really approves but we predicted reject,
+
+    then ``precision = TP / (TP + FP)``, ``recall = TP / (TP + FN)`` and
+    ``F1 = 2 * precision * recall / (precision + recall)``. A denominator of 0
+    (no predicted or no real approvals among the hidden projects) yields 0.0 for
+    that metric, the usual convention for an undefined score.
+
+    Parameters
+    ----------
+        real_approved : set[:py:class:`~pabutools.election.instance.Project`]
+            The projects the voter really approves (her ideal ballot A_v).
+        predicted_approved : set[:py:class:`~pabutools.election.instance.Project`]
+            The projects the prediction module marked as approved.
+        hidden : set[:py:class:`~pabutools.election.instance.Project`]
+            The voter's hidden set H_v, i.e. the projects scored (from
+            :py:func:`hidden_projects`).
+
+    Returns
+    -------
+        dict[str, float]
+            ``{"precision": ..., "recall": ..., "f1": ...}``, each in [0, 1].
+
+    Examples
+    --------
+    Four hidden projects, the voter really approves {p1, p2}, the model predicts
+    {p1, p3}: one hit (p1), one false alarm (p3), one miss (p2), so precision =
+    recall = F1 = 0.5. A perfect prediction scores 1.0 across the board.
+
+    >>> p1, p2, p3, p4 = (Project("p1", 1), Project("p2", 1),
+    ...                   Project("p3", 1), Project("p4", 1))
+    >>> hidden = {p1, p2, p3, p4}
+    >>> classification_metrics({p1, p2}, {p1, p3}, hidden)
+    {'precision': 0.5, 'recall': 0.5, 'f1': 0.5}
+    >>> classification_metrics({p1, p2}, {p1, p2}, hidden)
+    {'precision': 1.0, 'recall': 1.0, 'f1': 1.0}
+    """
+    # Restrict everything to the hidden projects: the exposed votes are known.
+    real = real_approved & hidden
+    predicted = predicted_approved & hidden
+    tp = len(real & predicted)
+    fp = len(predicted - real)
+    fn = len(real - predicted)
+    precision = tp / (tp + fp) if tp + fp else 0.0
+    recall = tp / (tp + fn) if tp + fn else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+    logger.info(
+        "classification_metrics: TP=%d FP=%d FN=%d -> P=%.3f R=%.3f F1=%.3f",
+        tp, fp, fn, precision, recall, f1,
+    )
+    return {"precision": precision, "recall": recall, "f1": f1}
 
 
 # ---------------------------------------------------------------------------
 # Section 5.2 - Bundle evaluation metrics.
 # ---------------------------------------------------------------------------
+# The Symmetric Distance (Section 5.2.1), |rb △ pb|, is a one-liner
+# ``len(real_bundle ^ predicted_bundle)`` computed inline where needed (see
+# ``run_all_experiments``), so it gets no function of its own.
 def fractional_allocation_score(
-    real_bundle: set[Project], predicted_bundle: set[Project], budget_limit: int
+    real_bundle: Iterable[Project],
+    predicted_bundle: Iterable[Project],
+    budget_limit: int,
 ) -> float:
     """
     Definition 5.1 (Fractional Allocation score): the total cost of the
@@ -866,10 +1156,12 @@ def fractional_allocation_score(
 
     Parameters
     ----------
-        real_bundle : set[:py:class:`~pabutools.election.instance.Project`]
-            The bundle obtained from the real (full) ballots.
-        predicted_bundle : set[:py:class:`~pabutools.election.instance.Project`]
-            The bundle obtained from the predicted ballots.
+        real_bundle : Iterable[:py:class:`~pabutools.election.instance.Project`]
+            The bundle obtained from the real (full) ballots - any iterable of
+            projects, e.g. the :py:class:`~pabutools.rules.budgetallocation.BudgetAllocation`
+            returned by :py:func:`greedy_approval`, as is.
+        predicted_bundle : Iterable[:py:class:`~pabutools.election.instance.Project`]
+            The bundle obtained from the predicted ballots (same, any iterable).
         budget_limit : int
             The budget limit B of the instance.
 
@@ -889,6 +1181,7 @@ def fractional_allocation_score(
     >>> fractional_allocation_score({p3}, {p1}, budget_limit=6)
     0.0
     """
+    real_bundle, predicted_bundle = set(real_bundle), set(predicted_bundle)
     # lambda = total cost of the correctly-predicted projects (pb ∩ rb).
     correctly_predicted = real_bundle & predicted_bundle
     score = total_cost(correctly_predicted) / budget_limit

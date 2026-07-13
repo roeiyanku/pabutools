@@ -1,7 +1,8 @@
 """
 Model *training* for the learning-based prediction modules of
-"A Recommendation System for Participatory Budgeting"
-(Leibiker & Talmon, 2023), Section 2.1.
+"A Recommendation System for Participatory Budgeting",
+by Gil Leibiker and Nimrod Talmon (2023), https://optlearnmas23.github.io/files/p17.pdf
+(Section 2.1).
 
 This module is intentionally separate from the module that *uses* the models
 (``pb_recommendation``): a ``train_*`` function fits an estimator and returns an

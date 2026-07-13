@@ -37,9 +37,12 @@ dependencies = [
 
 [project.optional-dependencies]
 recommendation = [
+    # predict_by_classification: XGBClassifier needs xgboost's sklearn API.
     "xgboost",
-    "scikit-surprise",
-    "lightfm"
+    "scikit-learn",
+    # Matrix factorization / factorization machines run on numpy (already a
+    # core dependency): the scikit-surprise / lightfm wheels do not build on
+    # Windows + NumPy 2, so pb_model_training uses its own SVD core instead.
 ]
 dev = [
     "coverage",
