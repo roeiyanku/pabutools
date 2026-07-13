@@ -405,6 +405,25 @@ class TestRunPipeline:
         assert sum(proj.cost for proj in bundle) <= inst.budget_limit
         assert len(bundle) > 0
 
+    def test_unknown_setup_raises_value_error(self):
+        p = make_projects([("p1", 1), ("p2", 1)])
+        inst = Instance(p.values(), budget_limit=2)
+        lv = ApprovalProfile([ApprovalBallot([p["p1"]])] * 2)
+        with pytest.raises(ValueError, match="unknown setup 'by_magic'"):
+            run_pipeline(inst, lv, {"v1": {p["p1"]}}, k=1,
+                         setup="by_magic",
+                         predict=predict_by_matrix_factorization)
+
+    def test_k_out_of_range_raises_value_error(self):
+        p = make_projects([("p1", 1), ("p2", 1)])
+        inst = Instance(p.values(), budget_limit=2)
+        lv = ApprovalProfile([ApprovalBallot([p["p1"]])] * 2)
+        for bad_k in (-1, 3):  # below 0 and above the number of projects
+            with pytest.raises(ValueError, match="must be between 0 and"):
+                run_pipeline(inst, lv, {"v1": {p["p1"]}}, k=bad_k,
+                             setup="random",
+                             predict=predict_by_matrix_factorization)
+
     @pytest.mark.parametrize("setup", [
         "random",
         "offline_popularity",

@@ -785,7 +785,27 @@ def exposed_sets(
     >>> lv = ApprovalProfile([ApprovalBallot([p1, p2]), ApprovalBallot([p1])])
     >>> exposed_sets(inst, lv, {"v3": {p1}}, "offline_popularity", k=1)
     {'v3': {p1}}
+
+    Invalid inputs raise a ValueError naming the problem:
+
+    >>> exposed_sets(inst, lv, {"v3": {p1}}, "by_magic", k=1)
+    Traceback (most recent call last):
+        ...
+    ValueError: unknown setup 'by_magic'; expected one of: random, offline_popularity, offline_consensus, offline_controversiality, online_adaptive_controversial
+    >>> exposed_sets(inst, lv, {"v3": {p1}}, "random", k=99)
+    Traceback (most recent call last):
+        ...
+    ValueError: k=99 must be between 0 and the number of projects (3)
     """
+    if setup not in SETUPS:
+        raise ValueError(
+            f"unknown setup {setup!r}; expected one of: " + ", ".join(SETUPS)
+        )
+    if not 0 <= k <= len(instance):
+        raise ValueError(
+            f"k={k} must be between 0 and the number of projects ({len(instance)})"
+        )
+    logger.debug("exposed_sets: validated setup=%s, k=%d", setup, k)
     if setup == "random":
         return {vid: random_setup(instance, k, seed) for vid in tv_ballots}
     if setup == "online_adaptive_controversial":
@@ -944,7 +964,7 @@ def run_pipeline(
         ]
     )
     logger.info(
-        "recommend: setup=%s predict=%s, %d LV + %d TV ballots",
+        "run_pipeline: setup=%s predict=%s, %d LV + %d TV ballots",
         setup, predict.__name__, lv_profile.num_ballots(), len(tv_ballots),
     )
     # Steps 5-6 - voting rule: greedy approval on the LV + completed TV ballots.
@@ -1194,5 +1214,52 @@ def fractional_allocation_score(
 
 if __name__ == "__main__":
     import doctest
+    import sys
 
-    doctest.testmod(verbose=True)
+    print(doctest.testmod())
+
+    # ------------------------------------------------------------------
+    # Logging demo - a complex example. Run ``python pb_recommendation.py``
+    # to see the full log trail of one end-to-end pipeline run.
+    # ------------------------------------------------------------------
+    logging.basicConfig(
+        level=logging.DEBUG, format="%(levelname)s\t%(message)s",
+        stream=sys.stdout,  # keep the log lines in order with the prints
+    )
+
+    print("\n--- Complex example: two-camp electorate, partial ballots ---")
+    projects = [Project(f"p{i}", 1) for i in range(1, 7)]
+    camp_a, camp_b = set(projects[:3]), set(projects[3:])
+    demo_instance = Instance(projects, budget_limit=3)
+    # The ideal instance: 18 voters approve {p1,p2,p3}, 12 approve {p4,p5,p6}.
+    demo_profile = ApprovalProfile(
+        [ApprovalBallot(camp_a)] * 18 + [ApprovalBallot(camp_b)] * 12
+    )
+    real = set(greedy_approval(demo_instance, demo_profile))
+
+    # A third of the voters only answer k=2 questions; predict the rest.
+    demo_lv, demo_tv = split_lv_tv(
+        demo_profile, sample_degree=1.0, lv_degree=2 / 3, seed=1
+    )
+    predicted = set(
+        run_pipeline(
+            demo_instance, demo_lv, demo_tv, k=2,
+            setup="offline_popularity", predict=predict_by_matrix_factorization,
+        )
+    )
+    fa = fractional_allocation_score(real, predicted, demo_instance.budget_limit)
+    print(f"real bundle:      {sorted(real, key=str)}")
+    print(f"predicted bundle: {sorted(predicted, key=str)}  (FA={fa:.2f})")
+
+    # ------------------------------------------------------------------
+    # Validation failure demo - invalid inputs raise a clear ValueError.
+    # ------------------------------------------------------------------
+    print("\n--- Validation failure demo ---")
+    for setup_name, k in [("by_magic", 2), ("random", 99)]:
+        try:
+            run_pipeline(
+                demo_instance, demo_lv, demo_tv, k=k,
+                setup=setup_name, predict=predict_by_matrix_factorization,
+            )
+        except ValueError as error:
+            print(f"Caught ValueError: {error}")
