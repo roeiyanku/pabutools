@@ -947,6 +947,10 @@ def run_pipeline(
     ...                     predict=predict_by_matrix_factorization), key=str)
     [p1, p2]
     """
+    logger.info(
+        "run_pipeline: starting with setup=%s predict=%s k=%d on %d LV + %d TV ballots",
+        setup, predict.__name__, k, lv_profile.num_ballots(), len(tv_ballots),
+    )
     # Step 1 (the LV/TV split) is done by the caller / :py:func:`split_lv_tv`.
     # Step 2 - sampling: pick the exposed set of every TV voter under the setup.
     exposed = exposed_sets(instance, lv_profile, tv_ballots, setup, k, seed)
@@ -964,8 +968,8 @@ def run_pipeline(
         ]
     )
     logger.info(
-        "run_pipeline: setup=%s predict=%s, %d LV + %d TV ballots",
-        setup, predict.__name__, lv_profile.num_ballots(), len(tv_ballots),
+        "run_pipeline: all %d TV ballots completed, running the voting rule",
+        len(tv_ballots),
     )
     # Steps 5-6 - voting rule: greedy approval on the LV + completed TV ballots.
     return greedy_approval(instance, combined)
@@ -1051,8 +1055,21 @@ def run_all_experiments(
     >>> all(0.0 <= c["FA"] <= 1.0 and c["SD"] >= 0 for c in results.values())
     True
     """
+    setups, predictors = tuple(setups), tuple(predictors)
+    sample_degrees, lv_degrees = tuple(sample_degrees), tuple(lv_degrees)
+    logger.info(
+        "run_all_experiments: sweeping %d setups x %d predictors x "
+        "%d sample degrees x %d LV degrees = %d cells, %d repeats each",
+        len(setups), len(predictors), len(sample_degrees), len(lv_degrees),
+        len(setups) * len(predictors) * len(sample_degrees) * len(lv_degrees),
+        n_repeat,
+    )
     # The real bundle: greedy approval on the whole ideal profile (all voters).
     real_bundle = set(greedy_approval(instance, profile))
+    logger.info(
+        "run_all_experiments: real bundle has %d projects (the ground truth "
+        "every cell is scored against)", len(real_bundle),
+    )
     rng = random.Random(seed)
     results: dict[tuple[float, float, str, str], dict[str, float]] = {}
     for sample_degree in sample_degrees:
@@ -1061,7 +1078,7 @@ def run_all_experiments(
                 for name in predictors:
                     predict = PREDICTORS[name]
                     fa_sum = sd_sum = 0.0
-                    for _ in range(n_repeat):
+                    for repeat in range(1, n_repeat + 1):
                         lv_profile, tv_ballots = split_lv_tv(
                             profile, sample_degree, lv_degree,
                             seed=rng.randrange(2**32),
@@ -1073,18 +1090,26 @@ def run_all_experiments(
                                 seed=rng.randrange(2**32),
                             )
                         )
-                        fa_sum += fractional_allocation_score(
+                        fa = fractional_allocation_score(
                             real_bundle, predicted, instance.budget_limit
                         )
                         # Symmetric Distance (Section 5.2.1): |rb △ pb|.
-                        sd_sum += len(real_bundle ^ predicted)
+                        sd = len(real_bundle ^ predicted)
+                        fa_sum += fa
+                        sd_sum += sd
+                        logger.debug(
+                            "run_all_experiments: repeat %d/%d of "
+                            "(sample=%.2f, lv=%.2f, %s, %s): FA=%.3f SD=%d",
+                            repeat, n_repeat, sample_degree, lv_degree,
+                            setup, name, fa, sd,
+                        )
                     cell = {"FA": fa_sum / n_repeat, "SD": sd_sum / n_repeat}
                     results[(sample_degree, lv_degree, setup, name)] = cell
                     logger.info(
                         "run_all_experiments: sample=%.2f lv=%.2f setup=%s "
-                        "predict=%s -> FA=%.3f SD=%.2f",
+                        "predict=%s -> mean FA=%.3f mean SD=%.2f over %d repeats",
                         sample_degree, lv_degree, setup, name,
-                        cell["FA"], cell["SD"],
+                        cell["FA"], cell["SD"], n_repeat,
                     )
     return results
 
