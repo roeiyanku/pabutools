@@ -40,9 +40,11 @@ recommendation = [
     # predict_by_classification: XGBClassifier needs xgboost's sklearn API.
     "xgboost",
     "scikit-learn",
-    # Matrix factorization / factorization machines run on numpy (already a
-    # core dependency): the scikit-surprise / lightfm wheels do not build on
-    # Windows + NumPy 2, so pb_model_training uses its own SVD core instead.
+    "pandas",
+    "scikit-surprise",
+    # lightfm-next is a drop-in, Python 3.12-compatible fork of LightFM.
+    "lightfm-next; python_version >= '3.12' and sys_platform != 'win32'",
+    "lightfm; python_version < '3.12'",
 ]
 dev = [
     "coverage",
