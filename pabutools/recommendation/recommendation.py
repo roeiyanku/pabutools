@@ -313,7 +313,7 @@ def greedy_approval(
 
     .. note::
         Delegates to pabutools'
-        :py:func:`~pabutools.rules.greedy_utilitarian_welfare` with
+        :py:func:`~pabutools.rules.greedywelfare.greedy_utilitarian_welfare` with
         :py:class:`~pabutools.election.satisfaction.additivesatisfaction.Cost_Sat`:
         the rule ranks by marginal satisfaction divided by cost, and under
         Cost_Sat a project's marginal satisfaction is score(p)*cost(p), so the
@@ -827,7 +827,7 @@ def plan_sampling(
     This is the arithmetic of Example 3.1 on its own. With n voters and m
     projects, ``sample_degree`` (s) fixes the total number of collected votes at
     s*n*m and ``lv_degree`` (l) is the share of those votes that come from full
-    ballots, so |LV| = round(s*l*n) and the remaining s*(1-l)*n*m votes are
+    ballots, so ``|LV|`` = round(s*l*n) and the remaining s*(1-l)*n*m votes are
     divided equally among the s*n*m Target Voters. ``lv_degree == 1`` is the
     paper's naive sampling baseline: the sampled voters answer in full and
     nobody else is asked anything, so k = 0.
@@ -918,9 +918,9 @@ def split_lv_tv(
     votes at s*n*m and ``lv_degree`` (l) is the share of those votes that come
     from full ballots:
 
-    * |LV| = round(s*l*n) voters, drawn at random, keep their full ballots;
+    * ``|LV|`` = round(s*l*n) voters, drawn at random, keep their full ballots;
     * every *other* voter is a TV, and the remaining s*(1-l)*n*m votes are
-      divided equally among them: k = round(s*(1-l)*n*m / |TV|).
+      divided equally among them: k = round(s*(1-l)*n*m / ``|TV|``).
 
     ``lv_degree == 1`` is the paper's naive "sampling" baseline (Section 6):
     the sampled voters answer in full and the rest of the community does not

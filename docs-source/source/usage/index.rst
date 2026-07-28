@@ -15,5 +15,6 @@ refer to the :ref:`quickstart` page.
     rules
     outcomevisualisation
     analysis
+    recommendation
     tiebreaking
     fractions
