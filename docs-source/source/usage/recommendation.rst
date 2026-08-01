@@ -157,9 +157,8 @@ be compared with the one complete information produces:
 
 .. code-block:: python
 
-    from pabutools.recommendation import (
-        run_experiment, greedy_approval, fractional_allocation_score,
-    )
+    from pabutools.recommendation import run_experiment, greedy_approval
+    from pabutools.analysis import fractional_allocation_score
 
     profile = ApprovalProfile([
         ApprovalBallot([garden, library]), ApprovalBallot([crossings, shade]),
@@ -177,13 +176,19 @@ be compared with the one complete information produces:
 
 The two arguments ``0.5, 0.5`` are the *sample degree* — the share of all voter-project
 votes that is collected — and the *LV degree*, the share of those votes coming from complete
-ballots. :py:func:`~pabutools.recommendation.recommendation.fractional_allocation_score`
+ballots. :py:func:`~pabutools.analysis.recommendationanalytics.fractional_allocation_score`
 reports the cost of the correctly predicted projects as a share of the budget, and the
 symmetric difference counts the projects on which the two allocations disagree.
 
-:py:func:`~pabutools.recommendation.recommendation.run_all_experiments` repeats this over a
-grid of both degrees, for every setup and every prediction module at once.
+:py:func:`~pabutools.analysis.recommendationanalytics.run_all_experiments` repeats this over
+a grid of both degrees, for every setup and every prediction module at once.
 
 To score the predicted votes themselves rather than the allocation, use
-:py:func:`~pabutools.recommendation.recommendation.classification_metrics`, which reports
+:py:func:`~pabutools.analysis.recommendationanalytics.classification_metrics`, which reports
 precision, recall and F1 over the projects a voter was never asked about.
+
+.. note::
+    The evaluation tools live in :py:mod:`~pabutools.analysis.recommendationanalytics`,
+    alongside the rest of Pabutools' analysis module, rather than in
+    :py:mod:`~pabutools.recommendation`: the recommendation module runs the system, the
+    analysis module measures how well it did.

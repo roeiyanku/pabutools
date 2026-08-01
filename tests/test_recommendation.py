@@ -55,13 +55,15 @@ from pabutools.recommendation import (
     split_lv_tv,
     plan_sampling,
     elect,
-    classification_metrics,
-    fractional_allocation_score,
 )
 from pabutools.recommendation.model_training import (
     train_factorization_machines,
     train_matrix_factorization,
 )
+
+# Evaluating the system lives with the rest of pabutools' analysis tools; the
+# end-to-end test below scores its own result with the paper's FA metric.
+from pabutools.analysis import fractional_allocation_score
 
 
 # ---------------------------------------------------------------------------
@@ -549,41 +551,6 @@ class TestRunPipeline(TestCase):
         assert fractional_allocation_score(
             real_bundle, predicted, inst.budget_limit) == 1.0
         assert len(real_bundle ^ predicted) == 0  # symmetric distance
-
-
-# ---------------------------------------------------------------------------
-# classification_metrics (Section 5.1)
-# ---------------------------------------------------------------------------
-class TestClassificationMetrics(TestCase):
-    def test_mixed_hit_miss_false_alarm(self):
-        p = make_projects([("p1", 1), ("p2", 1), ("p3", 1), ("p4", 1)])
-        hidden = set(p.values())
-        # really approves {p1, p2}, predicted {p1, p3}: hit p1, miss p2, false p3.
-        m = classification_metrics({p["p1"], p["p2"]}, {p["p1"], p["p3"]}, hidden)
-        assert m == {"precision": 0.5, "recall": 0.5, "f1": 0.5}
-
-    def test_exposed_votes_excluded(self):
-        # A wrong prediction on an *exposed* project must not affect the metrics:
-        # only the hidden set is scored. Hidden = {p2}, predicted perfectly there.
-        p = make_projects([("p1", 1), ("p2", 1)])
-        m = classification_metrics(
-            real_approved={p["p2"]},          # p1 exposed, p2 hidden+approved
-            predicted_approved={p["p1"], p["p2"]},
-            hidden={p["p2"]},
-        )
-        assert m == {"precision": 1.0, "recall": 1.0, "f1": 1.0}
-
-# ---------------------------------------------------------------------------
-# fractional_allocation_score
-# ---------------------------------------------------------------------------
-class TestFractionalAllocation(TestCase):
-    def test_partial_overlap(self):
-        p = make_projects([("p1", 2), ("p2", 3), ("p3", 5)])
-        # overlap is {p2}, cost 3, budget 10 -> 0.3
-        score = fractional_allocation_score(
-            {p["p1"], p["p2"]}, {p["p2"], p["p3"]}, budget_limit=10
-        )
-        self.assertAlmostEqual(float(score), 0.3)
 
 
 # ---------------------------------------------------------------------------

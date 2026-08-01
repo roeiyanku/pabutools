@@ -37,6 +37,13 @@ from pabutools.analysis.votersatisfaction import (
     percent_non_empty_handed,
     satisfaction_histogram,
 )
+from pabutools.analysis.recommendationanalytics import (
+    classification_metrics,
+    fractional_allocation_score,
+    run_all_experiments,
+    SAMPLE_DEGREES,
+    LV_DEGREES,
+)
 
 __all__ = [
     "ProjectLoss",
@@ -64,4 +71,9 @@ __all__ = [
     "gini_coefficient_of_satisfaction",
     "percent_non_empty_handed",
     "satisfaction_histogram",
+    "classification_metrics",
+    "fractional_allocation_score",
+    "run_all_experiments",
+    "SAMPLE_DEGREES",
+    "LV_DEGREES",
 ]

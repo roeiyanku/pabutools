@@ -47,3 +47,9 @@ Properties Specific to the Method of Equal Shares
 
 .. automodule:: pabutools.analysis.mesanalytics
    :members:
+
+Evaluation of the Recommendation System
+---------------------------------------
+
+.. automodule:: pabutools.analysis.recommendationanalytics
+   :members:

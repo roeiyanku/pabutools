@@ -3,8 +3,8 @@ Recommendation module
 
 .. automodule:: pabutools.recommendation
 
-Sampling, pipeline and evaluation
----------------------------------
+Sampling, pipeline and voting rule
+----------------------------------
 
 .. automodule:: pabutools.recommendation.recommendation
    :members:

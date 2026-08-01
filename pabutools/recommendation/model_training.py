@@ -1188,9 +1188,3 @@ def predict_by_factorization_machines(
     return _complete_by_scores(
         instance, lv_profile, tv_ballots, train_factorization_machines
     )
-
-
-if __name__ == "__main__":
-    import doctest
-
-    doctest.testmod(verbose=True)

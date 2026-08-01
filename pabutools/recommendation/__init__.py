@@ -4,10 +4,15 @@ Module implementing the algorithms of
 by Gil Leibiker and Nimrod Talmon (2023), https://optlearnmas23.github.io/files/p17.pdf
 
 :py:mod:`~pabutools.recommendation.recommendation` holds the sampling setups,
-the pipeline, the voting rule and the evaluation metrics;
+the pipeline and the voting rule;
 :py:mod:`~pabutools.recommendation.model_training` holds the fitting and
 prediction of the three learning-based modules (whose ML libraries are optional
 dependencies, installed with ``pip install pabutools[recommendation]``).
+
+Evaluating the system - the Section 5 accuracy metrics and the sweep over the
+paper's treatment matrix - lives in
+:py:mod:`~pabutools.analysis.recommendationanalytics`, alongside the rest of
+pabutools' analysis tools.
 
 Programmer: Roei Yanku
 """
@@ -43,11 +48,6 @@ from pabutools.recommendation.recommendation import (
     Predictor,
     as_predictor,
     elect,
-    SAMPLE_DEGREES,
-    LV_DEGREES,
-    run_all_experiments,
-    classification_metrics,
-    fractional_allocation_score,
 )
 from pabutools.recommendation.model_training import (
     train_classification,
@@ -100,10 +100,4 @@ __all__ = [
     "complete_ballots",
     "run_pipeline",
     "run_experiment",
-    "run_all_experiments",
-    "SAMPLE_DEGREES",
-    "LV_DEGREES",
-    # Section 5 - evaluation.
-    "classification_metrics",
-    "fractional_allocation_score",
 ]
