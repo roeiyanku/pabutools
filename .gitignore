@@ -171,3 +171,7 @@ analysis/Pabulib
 .vscode/
 .python-version
 .DS_Store
+
+# experiments_csv keeps timestamped copies of results here; the results
+# themselves are committed, so the copies are redundant.
+experiments/results_backup/

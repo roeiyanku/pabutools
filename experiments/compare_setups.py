@@ -50,6 +50,11 @@ logger = logging.getLogger(__name__)
 
 RESULTS_FOLDER = "experiments/results"
 
+#: Where ``experiments_csv`` keeps its timestamped copy of a results file.
+#: Named explicitly because it otherwise defaults to ``results_backup`` in the
+#: working directory, which puts it at the repository root.
+BACKUP_FOLDER = "experiments/results_backup"
+
 #: The four informed setups plus ``random``, the simple heuristic baseline.
 SETUPS_COMPARED = [
     "random",
@@ -169,7 +174,9 @@ def sweep_projects() -> experiments_csv.Experiment:
     for every setup x predictor pair. Stops enlarging the input once a run
     exceeds :py:data:`TIME_LIMIT`.
     """
-    experiment = experiments_csv.Experiment(RESULTS_FOLDER, "project_sweep.csv")
+    experiment = experiments_csv.Experiment(
+        RESULTS_FOLDER, "project_sweep.csv", BACKUP_FOLDER
+    )
     experiment.run_with_time_limit(
         single_run,
         {
@@ -191,7 +198,9 @@ def sweep_voters() -> experiments_csv.Experiment:
     The secondary sweep: the same measurements as the number of voters grows,
     with the projects held fixed.
     """
-    experiment = experiments_csv.Experiment(RESULTS_FOLDER, "voter_sweep.csv")
+    experiment = experiments_csv.Experiment(
+        RESULTS_FOLDER, "voter_sweep.csv", BACKUP_FOLDER
+    )
     experiment.run_with_time_limit(
         single_run,
         {
@@ -247,7 +256,9 @@ def sweep_partiality() -> experiments_csv.Experiment:
     questions k each Target Voter is asked. Input size is held fixed here, so
     the only thing moving is the parameters.
     """
-    experiment = experiments_csv.Experiment(RESULTS_FOLDER, "partiality_sweep.csv")
+    experiment = experiments_csv.Experiment(
+        RESULTS_FOLDER, "partiality_sweep.csv", BACKUP_FOLDER
+    )
     experiment.run_with_time_limit(
         single_run,
         {

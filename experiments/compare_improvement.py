@@ -48,6 +48,7 @@ import experiments_csv
 import pabutools.recommendation.model_training as model_training
 
 from experiments.compare_setups import (
+    BACKUP_FOLDER,
     LV_DEGREE,
     NUM_VOTERS,
     RESULTS_FOLDER,
@@ -90,7 +91,9 @@ def run_version(
 
 def sweep() -> experiments_csv.Experiment:
     """The before/after sweep, stopping at :py:data:`TIME_LIMIT` per run."""
-    experiment = experiments_csv.Experiment(RESULTS_FOLDER, "improvement.csv")
+    experiment = experiments_csv.Experiment(
+        RESULTS_FOLDER, "improvement.csv", BACKUP_FOLDER
+    )
     experiment.run_with_time_limit(
         run_version,
         {

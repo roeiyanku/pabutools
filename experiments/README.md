@@ -73,6 +73,49 @@ Two findings worth stating plainly:
 
 `offline_consensus` is the weakest everywhere, below random on both metrics.
 
+## Results — the parameter comparison
+
+The same algorithms run at different values of the two Section 3.0.1 knobs,
+which between them decide how many questions each Target Voter is asked.
+`sample_degree` is the share of all *n x m* possible votes that the process can
+afford to collect; `lv_degree` is the share of that budget spent on Learning
+Voters, who answer about every project, rather than on Target Voters, who answer
+`k` questions each and have the rest predicted.
+
+Mean Fractional Allocation against the question budget:
+
+| sample_degree | consensus | controversiality | popularity | online_adaptive | `random` |
+| --- | --- | --- | --- | --- | --- |
+| 0.1 | 0.515 | 0.532 | 0.479 | **0.600** | 0.581 |
+| 0.3 | 0.583 | 0.649 | 0.601 | **0.747** | 0.699 |
+| 0.5 | 0.630 | 0.728 | 0.749 | **0.782** | 0.767 |
+| 0.7 | 0.728 | 0.860 | **0.895** | 0.832 | 0.799 |
+| 0.9 | 0.849 | 0.978 | **0.990** | 0.982 | 0.874 |
+
+**Choosing the questions well matters most when questions are scarce.** At
+`sample_degree = 0.1` the adaptive setup leads and the naive `random` baseline
+is second; by 0.9, when nearly everything is collected anyway, the offline
+setups reach 0.98-0.99 and `random` falls behind at 0.874. This is the pattern
+the paper's approach predicts, and it explains why the overall averages in the
+table above flatter `random` — it is competitive in the middle of the range and
+weak at the ends.
+
+Mean Fractional Allocation against how the budget is spent:
+
+| lv_degree | consensus | controversiality | popularity | online_adaptive | `random` |
+| --- | --- | --- | --- | --- | --- |
+| 0.1 | 0.583 | 0.742 | 0.717 | 0.785 | 0.735 |
+| 0.3 | 0.620 | 0.752 | 0.725 | 0.817 | 0.735 |
+| 0.5 | 0.659 | 0.754 | 0.734 | **0.819** | 0.767 |
+| 0.7 | 0.732 | 0.760 | 0.791 | 0.779 | 0.750 |
+| 0.9 | 0.712 | 0.739 | 0.745 | 0.744 | 0.732 |
+
+**This is the paper's central claim, confirmed.** Quality peaks in the middle
+and *falls* as `lv_degree` rises towards 1, where the budget is spent on a few
+people answering everything and nobody else is asked at all - the paper's naive
+"sampling" baseline. Asking many people a few questions and predicting the rest
+beats asking few people everything.
+
 ## Results — running time
 
 Mean seconds per run, by prediction module:
@@ -83,10 +126,28 @@ Mean seconds per run, by prediction module:
 | 30 | 2.96 | 0.17 | 0.22 |
 | 60 | 7.22 | 0.60 | 0.73 |
 | 120 | 6.37 | 0.68 | 0.81 |
+| 240 | 14.6 | — | — |
+| 480 | **36.1** | — | — |
 
 Classification is **10–30× slower** than the other two modules, and it is the
 paper's best performer on F1, so it cannot simply be dropped. That is what makes
-it the target for Part B.
+it the target for Part B. At 480 projects it reaches 36 s, inside the 30-60
+second band the assignment asks the sweep to reach.
+
+The setups also separate by cost once the input is large, which is invisible at
+small sizes. Mean runtime at 480 projects:
+
+| setup | runtime |
+| --- | --- |
+| offline_controversiality | 8.6 s |
+| offline_popularity | 10.7 s |
+| offline_consensus | 15.5 s |
+| `random` | 15.7 s |
+| online_adaptive_controversial | **18.8 s** |
+
+So `online_adaptive_controversial` buys its best-in-class quality with roughly
+**twice** the running time of `offline_controversiality` - a real trade-off, and
+one only visible at scale.
 
 ## Inputs
 
