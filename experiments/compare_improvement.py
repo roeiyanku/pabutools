@@ -54,6 +54,7 @@ from experiments.compare_setups import (
     SAMPLE_DEGREE,
     SEEDS,
     TIME_LIMIT,
+    plot_csv,
     single_run,
 )
 
@@ -110,14 +111,9 @@ def sweep() -> experiments_csv.Experiment:
 def plot() -> None:
     """Runtime before and after, against the input size."""
     for value in ("runtime", "fractional_allocation", "f1"):
-        experiments_csv.single_plot_results(
-            f"{RESULTS_FOLDER}/improvement.csv",
-            filter={},
-            x_field="num_projects",
-            y_field=value,
-            z_field="version",
-            mean=True,
-            save_to_file=f"{RESULTS_FOLDER}/improvement_{value}.png",
+        plot_csv(
+            f"{RESULTS_FOLDER}/improvement.csv", "num_projects", value, "version",
+            f"{RESULTS_FOLDER}/improvement_{value}.png",
         )
 
 

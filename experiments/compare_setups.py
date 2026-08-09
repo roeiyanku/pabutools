@@ -64,8 +64,10 @@ SETUPS_COMPARED = [
 #: so runtime grows roughly linearly here (12 -> 24 -> 48 projects measured at
 #: about 6 -> 12 -> 23 seconds) while doubling the voters barely moved it.
 #: Grows until a single run passes the time limit; the harness then stops
-#: enlarging on its own.
-PROJECT_COUNTS = [10, 20, 30, 40, 60, 80, 120]
+#: enlarging on its own. Reaches into the assignment's 30-60 second band: the
+#: unimproved code needs about 61 s at 240 projects and the improved code about
+#: 16 s, so the sweep has to go well past 120 for the slower curve to get there.
+PROJECT_COUNTS = [10, 20, 30, 40, 60, 80, 120, 160, 240, 320, 480]
 
 #: Held fixed while projects grow, so the graph has one moving part. Swept
 #: separately in :py:func:`sweep_voters` as the secondary size axis.
@@ -75,9 +77,20 @@ NUM_VOTERS = 100
 VOTER_COUNTS = [50, 100, 200, 400, 800, 1600]
 
 #: Partiality knobs (Section 3.0.1), fixed at a mid-range value for the size
-#: sweep - they are swept separately in ``sweep_partiality``.
+#: sweep - they are swept separately in :py:func:`sweep_partiality`.
 SAMPLE_DEGREE = 0.5
 LV_DEGREE = 0.5
+
+#: The values those two knobs take in :py:func:`sweep_partiality`, which is the
+#: assignment's "one algorithm with several parameters, so compare different
+#: runs with different parameters". Trimmed from the paper's own grid
+#: (:py:data:`~pabutools.analysis.recommendationanalytics.SAMPLE_DEGREES` and
+#: ``LV_DEGREES``), which is 6 x 7 and would not finish.
+SAMPLE_DEGREES = [0.1, 0.3, 0.5, 0.7, 0.9]
+LV_DEGREES = [0.1, 0.3, 0.5, 0.7, 0.9]
+
+#: Projects used for the partiality sweep - small, since that grid is wide.
+PARTIALITY_PROJECTS = 30
 
 #: Repetitions per cell; the LV/TV split is random, so a single draw is noisy.
 #: Three, not the paper's 50: at 5 setups x 3 predictors x 7 sizes a single
@@ -199,17 +212,64 @@ def sweep_voters() -> experiments_csv.Experiment:
 PLOTTED = ("runtime", "f1", "fractional_allocation", "symmetric_distance")
 
 
+def plot_csv(csv_path: str, x_field: str, y_field: str, z_field: str,
+             save_to: str) -> None:
+    """
+    One graph, a line per value of ``z_field``, averaged over the repetitions.
+
+    ``experiments_csv.single_plot_results`` would be the natural call here, but
+    it crashes under pandas 3: ``Series.unique()`` on a text column now returns
+    a ``StringArray``, and the library calls ``.sort()`` on it, which that type
+    does not have. Reading the frame here and handing it to the library's own
+    ``plot_dataframe`` with the z column as plain objects keeps the plotting in
+    ``experiments_csv`` and steps around the incompatibility.
+    """
+    import pandas
+    from matplotlib import pyplot as plt
+
+    frame = pandas.read_csv(csv_path)
+    frame[z_field] = frame[z_field].astype(object)
+    plt.figure()
+    experiments_csv.plot_dataframe(plt, frame, x_field, y_field, z_field, mean=True)
+    plt.legend(prop={"size": 8})
+    plt.xlabel(x_field)
+    plt.ylabel(f"mean {y_field}")
+    plt.title(f"{y_field} by {x_field}")
+    plt.savefig(save_to, bbox_inches="tight")
+    plt.close()
+    logger.info("plot_csv: wrote %s", save_to)
+
+
+def sweep_partiality() -> experiments_csv.Experiment:
+    """
+    The parameter comparison: the same algorithm run at different values of the
+    two Section 3.0.1 partiality knobs, which between them decide how many
+    questions k each Target Voter is asked. Input size is held fixed here, so
+    the only thing moving is the parameters.
+    """
+    experiment = experiments_csv.Experiment(RESULTS_FOLDER, "partiality_sweep.csv")
+    experiment.run_with_time_limit(
+        single_run,
+        {
+            "num_voters": [NUM_VOTERS],
+            "num_projects": [PARTIALITY_PROJECTS],
+            "setup": SETUPS_COMPARED,
+            "predictor": list(PREDICTORS),
+            "sample_degree": SAMPLE_DEGREES,
+            "lv_degree": LV_DEGREES,
+            "seed": SEEDS,
+        },
+        time_limit=TIME_LIMIT,
+    )
+    return experiment
+
+
 def plot_sweep(csv_name: str, x_field: str) -> None:
     """Draw one graph per measurement from the named CSV, curve per setup."""
     for value in PLOTTED:
-        experiments_csv.single_plot_results(
-            f"{RESULTS_FOLDER}/{csv_name}.csv",
-            filter={},
-            x_field=x_field,
-            y_field=value,
-            z_field="setup",
-            mean=True,
-            save_to_file=f"{RESULTS_FOLDER}/{csv_name}_{value}.png",
+        plot_csv(
+            f"{RESULTS_FOLDER}/{csv_name}.csv", x_field, value, "setup",
+            f"{RESULTS_FOLDER}/{csv_name}_{value}.png",
         )
 
 
@@ -221,16 +281,26 @@ def main() -> None:
     parser.add_argument(
         "--voters", action="store_true", help="run the secondary voter sweep too"
     )
+    parser.add_argument(
+        "--partiality", action="store_true",
+        help="run the parameter sweep over the two partiality knobs",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     experiments_csv.logger.setLevel(logging.INFO)
 
     if not args.plot:
-        sweep_projects()
-        if args.voters:
-            sweep_voters()
-    plot_sweep("project_sweep", "num_projects")
+        if args.partiality:
+            sweep_partiality()
+        else:
+            sweep_projects()
+            if args.voters:
+                sweep_voters()
+    if args.partiality or args.plot:
+        plot_sweep("partiality_sweep", "sample_degree")
+    if not args.partiality:
+        plot_sweep("project_sweep", "num_projects")
     if args.voters or args.plot:
         plot_sweep("voter_sweep", "num_voters")
 
