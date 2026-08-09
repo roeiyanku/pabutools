@@ -307,3 +307,11 @@ plotting in `experiments_csv` and steps around the incompatibility.
 | `results/improvement.csv` | Part B, before and after |
 | `results/improvement_runtime.png` | **the before/after runtime graph** |
 | `results/project_sweep_*.png` | Part A graphs, one per measurement |
+| `results/*_runtime_<predictor>.png` | runtime per prediction module |
+
+**Read the per-predictor runtime graphs, not the combined one.** The combined
+graph averages classification (up to 44 s at 480 projects) together with matrix
+factorization and factorization machines (around 1 s), so its vertical scale is
+a blend of one slow module and two fast ones and the setups cannot be compared
+on it fairly. `project_sweep_runtime_classification.png` is the graph that shows
+the sweep reaching the assignment's 30-60 second band.

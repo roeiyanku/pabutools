@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 from time import perf_counter
 
 import experiments_csv
@@ -222,9 +223,12 @@ PLOTTED = ("runtime", "f1", "fractional_allocation", "symmetric_distance")
 
 
 def plot_csv(csv_path: str, x_field: str, y_field: str, z_field: str,
-             save_to: str) -> None:
+             save_to: str, where: dict | None = None,
+             title: str | None = None) -> None:
     """
     One graph, a line per value of ``z_field``, averaged over the repetitions.
+    ``where`` keeps only the rows matching every column/value pair it gives,
+    which is how the per-predictor graphs are drawn.
 
     ``experiments_csv.single_plot_results`` would be the natural call here, but
     it crashes under pandas 3: ``Series.unique()`` on a text column now returns
@@ -237,13 +241,15 @@ def plot_csv(csv_path: str, x_field: str, y_field: str, z_field: str,
     from matplotlib import pyplot as plt
 
     frame = pandas.read_csv(csv_path)
+    for column, value in (where or {}).items():
+        frame = frame[frame[column] == value]
     frame[z_field] = frame[z_field].astype(object)
     plt.figure()
     experiments_csv.plot_dataframe(plt, frame, x_field, y_field, z_field, mean=True)
     plt.legend(prop={"size": 8})
     plt.xlabel(x_field)
     plt.ylabel(f"mean {y_field}")
-    plt.title(f"{y_field} by {x_field}")
+    plt.title(title or f"{y_field} by {x_field}")
     plt.savefig(save_to, bbox_inches="tight")
     plt.close()
     logger.info("plot_csv: wrote %s", save_to)
@@ -276,11 +282,27 @@ def sweep_partiality() -> experiments_csv.Experiment:
 
 
 def plot_sweep(csv_name: str, x_field: str) -> None:
-    """Draw one graph per measurement from the named CSV, curve per setup."""
+    """
+    Draw one graph per measurement from the named CSV, a curve per setup, plus
+    one runtime graph per prediction module.
+
+    The per-predictor graphs are the ones to read for cost: the combined graph
+    averages classification (36 s at 480 projects) together with the other two
+    (around 1 s), so its scale is a blend of a slow module and two fast ones and
+    the setups cannot be compared on it fairly.
+    """
+    csv_path = f"{RESULTS_FOLDER}/{csv_name}.csv"
     for value in PLOTTED:
         plot_csv(
-            f"{RESULTS_FOLDER}/{csv_name}.csv", x_field, value, "setup",
+            csv_path, x_field, value, "setup",
             f"{RESULTS_FOLDER}/{csv_name}_{value}.png",
+        )
+    for predictor in PREDICTORS:
+        plot_csv(
+            csv_path, x_field, "runtime", "setup",
+            f"{RESULTS_FOLDER}/{csv_name}_runtime_{predictor}.png",
+            where={"predictor": predictor},
+            title=f"runtime by {x_field} - {predictor}",
         )
 
 
@@ -308,12 +330,15 @@ def main() -> None:
             sweep_projects()
             if args.voters:
                 sweep_voters()
-    if args.partiality or args.plot:
-        plot_sweep("partiality_sweep", "sample_degree")
-    if not args.partiality:
-        plot_sweep("project_sweep", "num_projects")
-    if args.voters or args.plot:
-        plot_sweep("voter_sweep", "num_voters")
+    # Plot whichever sweeps have actually been run - ``--plot`` is meant to
+    # redraw everything on disk, and a sweep that was never run has no CSV.
+    for csv_name, x_field in (
+        ("partiality_sweep", "sample_degree"),
+        ("project_sweep", "num_projects"),
+        ("voter_sweep", "num_voters"),
+    ):
+        if os.path.exists(f"{RESULTS_FOLDER}/{csv_name}.csv"):
+            plot_sweep(csv_name, x_field)
 
 
 if __name__ == "__main__":
