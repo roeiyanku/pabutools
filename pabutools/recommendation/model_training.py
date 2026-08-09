@@ -55,6 +55,7 @@ Date: 2026-06-20.
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
@@ -86,6 +87,35 @@ DEFAULT_PARAM_GRID = (
     {"n_estimators": 200, "max_depth": 3, "learning_rate": 0.05},
     {"n_estimators": 200, "max_depth": 6, "learning_rate": 0.1},
 )
+
+#: How many projects the hyperparameter search of :py:func:`train_classification`
+#: fits before scoring a candidate setting; ``None`` uses all of them.
+#:
+#: The search exists only to rank the settings in :py:data:`DEFAULT_PARAM_GRID`
+#: against one another, and a sample of the projects ranks them just as well as
+#: the whole bundle does. Fitting all of them made tuning cost
+#: ``len(param_grid)`` full bundles - three quarters of the total work, since
+#: the winner is then refitted on everything anyway.
+TUNING_PROJECTS: int | None = 10
+
+#: Default for ``train_classification``'s ``tuning_projects``, resolved against
+#: :py:data:`TUNING_PROJECTS` when the function runs rather than when it is
+#: defined - otherwise rebinding the constant (as the ``experiments/`` before
+#: and after comparison does) would silently have no effect.
+_FROM_CONFIG = object()
+
+#: Threads used to fit the per-project classifiers of :py:func:`_fit_per_project`
+#: in parallel. ``1`` fits sequentially.
+#:
+#: .. warning::
+#:     Defaults to 1, i.e. **off**. Threading this loop was measured to be
+#:     *slower*, not faster: 11.18 s against 4.11 s sequential on 30 projects
+#:     and 100 voters. The reason is visible in the profile - the fitting is
+#:     dominated by XGBoost's own Python-level per-round bookkeeping
+#:     (``_get_feature_info`` alone is called 63,360 times in a single run),
+#:     not by its compiled training code, so the threads spend their time
+#:     contending for the GIL rather than working in parallel.
+FIT_THREADS: int = 1
 
 
 def _xgboost():
@@ -201,12 +231,17 @@ def _project_rows(
 
 def _fit_per_project(
     projects: list[Project], lv_features: np.ndarray, lv_labels: np.ndarray,
-    tv_votes: np.ndarray, params: dict,
+    tv_votes: np.ndarray, params: dict, only: set[int] | None = None,
 ) -> dict[Project, tuple]:
     """
     Fit one classifier per project on the given collected votes. A project whose
     collected votes all agree (or that nobody voted on) needs no classifier, so
     its common/majority preference is stored directly.
+
+    ``only`` restricts the work to the given column indices, leaving the other
+    projects out of the returned bundle entirely. It exists for the
+    hyperparameter search of :py:func:`train_classification`, which compares
+    settings against each other and does not need the whole bundle to do it.
 
     Examples
     --------
@@ -219,18 +254,75 @@ def _fit_per_project(
     >>> fitted = _fit_per_project([p1, p2], votes, votes, np.zeros((0, 2)), {})
     >>> fitted[p1], fitted[p2]
     (('const', 1), ('const', 0))
+
+    With ``only``, the projects left out simply do not appear.
+
+    >>> sorted(_fit_per_project([p1, p2], votes, votes, np.zeros((0, 2)), {},
+    ...                         only={0}), key=str)
+    [p1]
     """
     per_project: dict[Project, tuple] = {}
+    to_fit: list[tuple[Project, np.ndarray, np.ndarray]] = []
     for index, project in enumerate(projects):
+        if only is not None and index not in only:
+            continue
         X, y = _project_rows(index, lv_features, lv_labels, tv_votes)
         # An empty y has fewer than 2 distinct labels too, so it is covered.
         if X.shape[1] == 0 or len(set(y.tolist())) < 2:
             per_project[project] = (
                 "const", int(len(y) > 0 and 2 * int(y.sum()) >= len(y))
             )
-            continue
-        settings = dict(params)
-        # Section 5 addresses the ~10% approval rate of Table 1 "by modifying
+        else:
+            to_fit.append((project, X, y))
+
+    # The projects left over each need a classifier, and none of them depends on
+    # another's result, so they are fitted in parallel. Every worker only reads
+    # the shared arrays and returns its own pair, so there is no shared mutable
+    # state to guard with a lock.
+    if not to_fit:
+        return per_project
+    if FIT_THREADS == 1 or len(to_fit) == 1:
+        fitted = [_fit_one_project(*args, projects, params) for args in to_fit]
+    else:
+        with ThreadPoolExecutor(max_workers=FIT_THREADS) as executor:
+            futures = [
+                executor.submit(_fit_one_project, project, X, y, projects, params)
+                for project, X, y in to_fit
+            ]
+            fitted = [future.result() for future in futures]
+    logger.info(
+        "_fit_per_project: fitted %d classifiers on %d thread(s), %d project(s) "
+        "needed no model",
+        len(fitted), 1 if FIT_THREADS == 1 else (FIT_THREADS or 0),
+        len(per_project),
+    )
+    per_project.update(fitted)
+    return per_project
+
+
+def _fit_one_project(
+    project: Project, X: np.ndarray, y: np.ndarray,
+    projects: list[Project], params: dict,
+) -> tuple[Project, tuple]:
+    """
+    Fit the single classifier that predicts the votes on ``project`` from the
+    votes on all the others, and return it keyed by its project. Split out of
+    :py:func:`_fit_per_project` so that the fits, which are independent of one
+    another, can be handed to a thread pool.
+
+    Examples
+    --------
+    Two voters who disagree on p1 while agreeing on p2, so p1 does need a model.
+
+    >>> p1, p2 = Project("p1", 1), Project("p2", 1)
+    >>> X, y = np.array([[0.0], [1.0]]), np.array([1.0, 0.0])
+    >>> fitted_project, (kind, (others, _)) = _fit_one_project(
+    ...     p1, X, y, [p1, p2], {"n_estimators": 2})
+    >>> fitted_project, kind, others
+    (p1, 'model', [p2])
+    """
+    settings = dict(params)
+    # Section 5 addresses the ~10% approval rate of Table 1 "by modifying
         # the model loss function to give more weight to minority class
         # samples", which for XGBoost is ``scale_pos_weight`` (the weighted-loss
         # approach of the paper's reference [26]). ``class_weight`` is the
@@ -255,19 +347,23 @@ def _fit_per_project(
         # care about per-voter recall rather than the winning bundle: recall
         # goes 0.078 -> 0.773 across that same range, while precision stays
         # near 0.08.
-        exponent = settings.pop("class_weight", 0.0)
-        positives = int(y.sum())
-        negatives = len(y) - positives
-        ratio = (negatives / positives) if positives else 1.0
-        classifier = _xgboost().XGBClassifier(
-            verbosity=0,
-            scale_pos_weight=ratio ** exponent,
-            **settings,
-        )
-        classifier.fit(X, y)
-        per_project[project] = ("model", ([p for p in projects if p != project],
-                                         classifier))
-    return per_project
+    exponent = settings.pop("class_weight", 0.0)
+    positives = int(y.sum())
+    negatives = len(y) - positives
+    ratio = (negatives / positives) if positives else 1.0
+    # ``n_jobs=1`` unless the caller asked otherwise: each model is fitted on a
+    # single project's votes, which is far too little data for XGBoost's own
+    # threading to pay off - measured at 8.02 s with its default (all cores) and
+    # 7.75 s pinned to one, while its 235% CPU left nothing spare. Pinning each
+    # model to one core is what makes the parallelism *across* projects useful.
+    settings.setdefault("n_jobs", 1)
+    classifier = _xgboost().XGBClassifier(
+        verbosity=0,
+        scale_pos_weight=ratio ** exponent,
+        **settings,
+    )
+    classifier.fit(X, y)
+    return project, ("model", ([p for p in projects if p != project], classifier))
 
 
 def _pooled_f1(
@@ -299,6 +395,10 @@ def _pooled_f1(
     """
     tp = fp = fn = 0
     for index, project in enumerate(projects):
+        # A bundle fitted with ``only`` covers a subset of the projects; the
+        # rest carry no prediction to score.
+        if project not in per_project:
+            continue
         X, y = _project_rows(index, lv_features, lv_labels, tv_votes)
         if len(y) == 0:
             continue
@@ -338,6 +438,7 @@ def train_classification(
     *,
     validation_fraction: float = 0.15,
     param_grid=DEFAULT_PARAM_GRID,
+    tuning_projects=_FROM_CONFIG,
     seed: int = 0,
 ) -> dict:
     """
@@ -388,6 +489,10 @@ def train_classification(
             The settings to score, defaulting to :py:data:`DEFAULT_PARAM_GRID`.
             Tuning multiplies the number of fits by ``len(param_grid)``, so pass
             a single setting - or ``()`` - for large sweeps.
+        tuning_projects : int, optional
+            How many projects to fit when scoring a candidate setting, defaulting
+            to :py:data:`TUNING_PROJECTS`. ``None`` fits the whole bundle for
+            every candidate, which is what the search used to do.
         seed : int, optional
             Seed for the validation split, for reproducibility.
     Returns
@@ -422,6 +527,8 @@ def train_classification(
     >>> train_classification(inst, lv, tv)["per_project"][p2][0]
     'model'
     """
+    if tuning_projects is _FROM_CONFIG:
+        tuning_projects = TUNING_PROJECTS
     projects = sorted(instance, key=str)
     lv = list(lv_profile)
     tv = list((tv_ballots or {}).values())
@@ -458,11 +565,21 @@ def train_classification(
         # Every LV voter now owns ``copies`` rows, in [full, blanked] order, so
         # her copies must fall on the same side of the split as she does.
         rows_held = np.tile(lv_held, copies)
+        # Rank the candidates on a sample of the projects rather than the whole
+        # bundle - the same sample for every candidate, so the comparison stays
+        # like for like.
+        sampled = None
+        if tuning_projects is not None and tuning_projects < len(projects):
+            sampled = set(
+                np.random.default_rng(seed)
+                .permutation(len(projects))[:tuning_projects]
+                .tolist()
+            )
         best_f1 = -1.0
         for candidate in param_grid:
             trained = _fit_per_project(
                 projects, lv_features[~rows_held], lv_labels[~rows_held],
-                tv_votes[~tv_held], candidate,
+                tv_votes[~tv_held], candidate, only=sampled,
             )
             score = _pooled_f1(
                 trained, projects, lv_features[rows_held], lv_labels[rows_held],
@@ -473,9 +590,10 @@ def train_classification(
             if score > best_f1:
                 params, best_f1 = dict(candidate), score
         logger.info(
-            "train_classification: tuned on %d of %d held-out voters, "
-            "best pooled F1 %.4f with %s",
-            n_validation, n_voters, best_f1, params,
+            "train_classification: tuned on %d of %d held-out voters over %d "
+            "of %d projects, best pooled F1 %.4f with %s",
+            n_validation, n_voters, len(sampled) if sampled else len(projects),
+            len(projects), best_f1, params,
         )
     per_project = _fit_per_project(
         projects, lv_features, lv_labels, tv_votes, params
