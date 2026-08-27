@@ -221,6 +221,28 @@ def sweep_voters() -> experiments_csv.Experiment:
 #: The measurements plotted against each size axis.
 PLOTTED = ("runtime", "f1", "fractional_allocation", "symmetric_distance")
 
+#: Units for the axis labels, keyed by column name. Columns absent here are
+#: dimensionless scores.
+UNITS = {
+    "runtime": "seconds",
+    "pipeline_runtime": "seconds",
+    "f1": "score in [0, 1]",
+    "precision": "score in [0, 1]",
+    "recall": "score in [0, 1]",
+    "fractional_allocation": "fraction of the budget, in [0, 1]",
+    "symmetric_distance": "number of projects",
+    "num_projects": "projects",
+    "num_voters": "voters",
+    "sample_degree": "fraction of all votes collected",
+    "lv_degree": "fraction of collected votes from full ballots",
+}
+
+
+def _label(field: str, prefix: str = "") -> str:
+    """The axis label for ``field``: its name, plus its unit when it has one."""
+    unit = UNITS.get(field)
+    return f"{prefix}{field} ({unit})" if unit else f"{prefix}{field}"
+
 
 def plot_csv(csv_path: str, x_field: str, y_field: str, z_field: str,
              save_to: str, where: dict | None = None,
@@ -247,8 +269,8 @@ def plot_csv(csv_path: str, x_field: str, y_field: str, z_field: str,
     plt.figure()
     experiments_csv.plot_dataframe(plt, frame, x_field, y_field, z_field, mean=True)
     plt.legend(prop={"size": 8})
-    plt.xlabel(x_field)
-    plt.ylabel(f"mean {y_field}")
+    plt.xlabel(_label(x_field))
+    plt.ylabel(_label(y_field, prefix="mean "))
     plt.title(title or f"{y_field} by {x_field}")
     plt.savefig(save_to, bbox_inches="tight")
     plt.close()
