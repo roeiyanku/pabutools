@@ -326,6 +326,13 @@ def plot_sweep(csv_name: str, x_field: str) -> None:
             where={"predictor": predictor},
             title=f"runtime by {x_field} - {predictor}",
         )
+    # The prediction modules against each other - the one graph where the
+    # lines are the models, not the setups.
+    plot_csv(
+        csv_path, x_field, "runtime", "predictor",
+        f"{RESULTS_FOLDER}/{csv_name}_runtime_by_predictor.png",
+        title=f"runtime by {x_field} - the three prediction modules",
+    )
 
 
 def main() -> None:
